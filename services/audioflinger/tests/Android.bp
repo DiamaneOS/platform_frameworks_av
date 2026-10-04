@@ -1,0 +1,32 @@
+package {
+    default_team: "trendy_team_media_framework_audio",
+    default_applicable_licenses: ["frameworks_av_services_audioflinger_license"],
+}
+
+cc_test {
+    name: "callaudioparameters_tests",
+
+    host_supported: true,
+
+    srcs: [
+        "callaudioparameters_tests.cpp",
+    ],
+
+    shared_libs: [
+        "liblog",
+        "libmedia_helper",
+        "libutils",
+    ],
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+    ],
+
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
+}
