@@ -1747,7 +1747,7 @@ void Track::reset()
 
 status_t Track::setParameters(const String8& keyValuePairs)
 {
-    // Voice-session parameters are global; the signed bridge uses AudioFlinger.
+    // Call audio parameters are global; their owners set them through AudioFlinger.
     // A direct/offload track must not provide another route to those HAL keys.
     if (containsCallAudioParameter(keyValuePairs)) return PERMISSION_DENIED;
     const sp<IAfThreadBase> thread = mThread.promote();

@@ -1772,6 +1772,21 @@ static bool canControlCallAudio() {
     return packages.size() == 1 && packages[0] == bridge;
 }
 
+// TTY, hearing-aid, voice-quality and Bluetooth voice-link keys also change a live call.
+// Platform services own them: AudioService and Telecom run as system, Settings as system in
+// any user, the phone process as radio and the Bluetooth stack as bluetooth.
+static bool canUseCallAudioParameters(const String8& keyValuePairs) {
+    const unsigned groups = callAudioParameterGroups(keyValuePairs);
+    if (groups == 0) return true;
+    const uid_t uid = IPCThreadState::self()->getCallingUid();
+    const uid_t appId = multiuser_get_app_id(uid);
+    const bool platform = uid == AID_ROOT || uid == AID_AUDIOSERVER
+            || appId == AID_SYSTEM || appId == AID_RADIO;
+    if ((groups & kCallAudioFeatureKeys) && !platform) return false;
+    if ((groups & kCallAudioBluetoothKeys) && !platform && appId != AID_BLUETOOTH) return false;
+    return (groups & kCallAudioSessionKeys) == 0 || canControlCallAudio();
+}
+
 // Filter reserved keys from setParameters() before forwarding to audio HAL or acting upon.
 // Some keys are used for audio routing and audio path configuration and should be reserved for use
 // by audio policy and audio flinger for functional, privacy and security reasons.
@@ -1836,7 +1851,9 @@ status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& 
     // check calling permissions
     VALUE_OR_RETURN_CONVERTED(enforceCallingPermission(MODIFY_AUDIO_SETTINGS));
 
-    if (containsCallAudioParameter(keyValuePairs) && !canControlCallAudio()) {
+    if (!canUseCallAudioParameters(keyValuePairs)) {
+        ALOGW("%s: call audio parameters denied for uid %d", __func__,
+                IPCThreadState::self()->getCallingUid());
         return PERMISSION_DENIED;
     }
 
@@ -1919,7 +1936,7 @@ status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& 
 
 String8 AudioFlinger::getParameters(audio_io_handle_t ioHandle, const String8& keys) const
 {
-    if (containsCallAudioParameter(keys) && !canControlCallAudio()) return String8();
+    if (!canUseCallAudioParameters(keys)) return String8();
     ALOGVV("getParameters() io %d, keys %s, calling pid %d",
             ioHandle, keys.c_str(), IPCThreadState::self()->getCallingPid());
 
