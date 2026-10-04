@@ -25,6 +25,7 @@
 
 #include "Configuration.h"
 #include "AudioFlinger.h"
+#include "CallAudioParameters.h"
 
 #include <afutils/FallibleLockGuard.h>
 #include <afutils/NBAIO_Tee.h>
@@ -37,6 +38,7 @@
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <binder/Parcel.h>
+#include <binder/PermissionController.h>
 #include <cutils/properties.h>
 #include <com_android_media_audio.h>
 #include <com_android_media_audioserver.h>
@@ -60,6 +62,7 @@
 #include <system/audio_effects/effect_spatializer.h>
 #include <system/audio_effects/effect_visualizer.h>
 #include <utils/Log.h>
+#include <private/android_filesystem_config.h>
 
 // not needed with the includes above, added to prevent transitive include dependency.
 #include <atomic>
@@ -1743,6 +1746,32 @@ IAfRecordThread* AudioFlinger::getRecordThreadForDevice_l(audio_devices_t device
     return (it != mRecordThreads.end()) ? it->second.get() : nullptr;
 }
 
+// Vendor call-control parameters affect voice sessions, including emergency calls.
+// The normal MODIFY_AUDIO_SETTINGS permission is insufficient for these keys.
+// Other audio parameters retain the platform's existing permission/filter policy.
+static bool canControlCallAudio() {
+    const auto* caller = IPCThreadState::self();
+    const uid_t uid = caller->getCallingUid();
+    if (uid == AID_ROOT || uid == AID_SYSTEM || uid == AID_RADIO || uid == AID_AUDIOSERVER) {
+        return true;
+    }
+    // This package is never shared-UID and starts only in the primary user.
+    // Read live package state; the audio permission provider caches UID packages.
+    if (uid >= AID_USER_OFFSET) return false;
+    PermissionController permissions;
+    static const String16 bridge("de.diamaneos.callaudio");
+    Vector<String16> packages;
+    permissions.getPackagesForUid(uid, packages);
+    if (packages.size() != 1 || packages[0] != bridge) return false;
+    static const String16 permission("android.permission.DIAMANEOS_CONTROL_CALL_AUDIO");
+    // Signature/privileged ownership is enforced by the platform. Do not retain
+    // a grant/denial beyond this transaction or authorize other default signers.
+    if (!permissions.checkPermission(permission, caller->getCallingPid(), uid)) return false;
+    packages.clear();
+    permissions.getPackagesForUid(uid, packages);
+    return packages.size() == 1 && packages[0] == bridge;
+}
+
 // Filter reserved keys from setParameters() before forwarding to audio HAL or acting upon.
 // Some keys are used for audio routing and audio path configuration and should be reserved for use
 // by audio policy and audio flinger for functional, privacy and security reasons.
@@ -1806,6 +1835,10 @@ status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& 
 
     // check calling permissions
     VALUE_OR_RETURN_CONVERTED(enforceCallingPermission(MODIFY_AUDIO_SETTINGS));
+
+    if (containsCallAudioParameter(keyValuePairs) && !canControlCallAudio()) {
+        return PERMISSION_DENIED;
+    }
 
     String8 filteredKeyValuePairs = keyValuePairs;
     filterReservedParameters(filteredKeyValuePairs, IPCThreadState::self()->getCallingUid());
@@ -1886,6 +1919,7 @@ status_t AudioFlinger::setParameters(audio_io_handle_t ioHandle, const String8& 
 
 String8 AudioFlinger::getParameters(audio_io_handle_t ioHandle, const String8& keys) const
 {
+    if (containsCallAudioParameter(keys) && !canControlCallAudio()) return String8();
     ALOGVV("getParameters() io %d, keys %s, calling pid %d",
             ioHandle, keys.c_str(), IPCThreadState::self()->getCallingPid());
 

@@ -37,6 +37,7 @@
 #include <media/AudioPermissionPolicy.h>
 #include <media/AudioValidator.h>
 #include <media/IPermissionProvider.h>
+#include "CallAudioParameters.h"
 #include <media/RecordBufferConverter.h>
 #include <media/nbaio/Pipe.h>
 #include <media/nbaio/PipeReader.h>
@@ -1746,6 +1747,9 @@ void Track::reset()
 
 status_t Track::setParameters(const String8& keyValuePairs)
 {
+    // Voice-session parameters are global; the signed bridge uses AudioFlinger.
+    // A direct/offload track must not provide another route to those HAL keys.
+    if (containsCallAudioParameter(keyValuePairs)) return PERMISSION_DENIED;
     const sp<IAfThreadBase> thread = mThread.promote();
     if (thread == 0) {
         ALOGE("%s(%d): thread is dead", __func__, mId);
@@ -3344,6 +3348,7 @@ status_t RecordTrack::shareAudioHistory(
 }
 
 status_t RecordTrack::setParameters(const String8& keyValuePairs) {
+    if (containsCallAudioParameter(keyValuePairs)) return PERMISSION_DENIED;
     const sp<IAfThreadBase> thread = mThread.promote();
     if (thread == nullptr) {
         ALOGE("%s(%d): thread is dead", __func__, mId);
