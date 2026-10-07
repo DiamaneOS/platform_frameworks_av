@@ -192,7 +192,9 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
     // streams; mute processed-only sessions with the tonemap instead.
     if (mSupportCameraMute && camera3::isTestPatternSessionKey(mDeviceInfo) &&
             camera3::supportsCameraMuteTonemapBlanking(mDeviceInfo)) {
-        mCameraMuteTonemapState = std::make_shared<camera3::CameraMuteTonemapState>();
+        camera_metadata_entry_t maxPoints = mDeviceInfo.find(ANDROID_TONEMAP_MAX_CURVE_POINTS);
+        size_t gridPoints = std::min<size_t>(32, maxPoints.count > 0 ? maxPoints.data.i32[0] : 2);
+        mCameraMuteTonemapState = std::make_shared<camera3::CameraMuteTonemapState>(gridPoints);
         ALOGI("%s: Camera %s: test pattern is a session key, muting with the tonemap",
                 __FUNCTION__, mId.c_str());
         // Tonemap values to restore where the app's request has none (see CameraMuteUtils.h)
@@ -203,6 +205,9 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
             defaults.acquire(previewTemplate);
             mCameraMuteDefaultTonemap = camera3::CameraMuteTonemap::fromSettings(defaults);
         }
+        ALOGI("%s: Camera %s: preview template tonemap: mode %s, curves %s", __FUNCTION__,
+                mId.c_str(), mCameraMuteDefaultTonemap.hasMode ? "yes" : "no",
+                mCameraMuteDefaultTonemap.hasCurve[0] ? "yes" : "no");
     }
 
     camera_metadata_entry_t availableSettingsOverrides = mDeviceInfo.find(
@@ -3059,9 +3064,10 @@ status_t Camera3Device::registerInFlight(uint32_t frameNumber,
             outputSurfaces, transform);
     if (cameraMuteResultFixup != nullptr && cameraMuteResultFixup->tonemapBlanked) {
         // Hold this frame's buffers until its result shows the curve applied.
-        request.cameraMuteTonemapState = std::move(cameraMuteTonemapState);
         request.cameraMuteHoldBuffers = true;
     }
+    // Live frames' results also report the HAL's own curves, kept for unmuting.
+    request.cameraMuteTonemapState = std::move(cameraMuteTonemapState);
     request.cameraMuteResultFixup = std::move(cameraMuteResultFixup);
 
     ssize_t res;
@@ -5552,8 +5558,13 @@ bool Camera3Device::RequestThread::overrideTestPattern(
     }
 
     // Only the logical camera's settings drive the processed outputs.
+    // App values, then the HAL's template, then the first live curves the HAL reported (FP6:
+    // the template has no curves), then an evenly spaced grid.
     auto restoreTonemap = [&]() {
-        return request->mOriginalTonemap.withDefaults(mCameraMuteDefaultTonemap);
+        camera3::CameraMuteTonemap tonemap =
+                request->mOriginalTonemap.withDefaults(mCameraMuteDefaultTonemap);
+        return mCameraMuteTonemapState == nullptr ? tonemap :
+                tonemap.withDefaults(mCameraMuteTonemapState->restoreCurves());
     };
     if (mCameraMuteTonemapState != nullptr && !request->mSettingsList.empty()) {
         if (tonemapMute) {
@@ -5563,8 +5574,16 @@ bool Camera3Device::RequestThread::overrideTestPattern(
         } else if (mCameraMuteCurveSent || request->mTonemapMuted) {
             // The HAL keeps the zero curve's control points until a request carries curves
             // again: restore the app's values, with the default curves where it has none.
+            camera3::CameraMuteTonemap restore = restoreTonemap();
             changed |= camera3::overrideTonemapForMute(
-                    &request->mSettingsList.begin()->metadata, false, restoreTonemap());
+                    &request->mSettingsList.begin()->metadata, false, restore);
+            if (mCameraMuteCurveSent) {
+                ALOGI("Camera mute: restoring the tonemap with %zu-point curves (%s)",
+                        restore.curve[0].size() / 2,
+                        request->mOriginalTonemap.hasCurve[0] ? "app" :
+                        mCameraMuteDefaultTonemap.hasCurve[0] ? "template" :
+                        mCameraMuteTonemapState->hasLiveCurves() ? "live result" : "grid");
+            }
             mCameraMuteCurveSent = false;
         }
         request->mTonemapMuted = tonemapMute;

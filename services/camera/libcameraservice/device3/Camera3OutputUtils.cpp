@@ -955,6 +955,14 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                     applied.append(collectedPartialResult);
                 }
                 releaseCameraMuteHeldBuffers(states, request, isTonemapBlankedResult(applied));
+            } else if (request.cameraMuteTonemapState != nullptr &&
+                    request.cameraMuteResultFixup == nullptr &&
+                    !request.cameraMuteTonemapState->hasLiveCurves()) {
+                if (request.cameraMuteTonemapState->reportLiveResult(result->result)) {
+                    ALOGI("%s: Camera %s: keeping the HAL's live tonemap curves (frame %u) to "
+                            "restore after mute", __FUNCTION__, states.cameraId.c_str(),
+                            frameNumber);
+                }
             }
             request.haveResultMetadata = true;
             request.errorBufStrategy = ERROR_BUF_RETURN_NOTIFY;

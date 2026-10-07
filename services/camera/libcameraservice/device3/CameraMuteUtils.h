@@ -5,6 +5,7 @@
 #define ANDROID_SERVERS_CAMERA3_CAMERAMUTEUTILS_H
 
 #include <atomic>
+#include <mutex>
 #include <map>
 #include <string>
 #include <vector>
@@ -56,8 +57,9 @@ struct CameraMuteTonemap {
 // Sets an all-zero tonemap curve (mute) or restores the original tonemap values. Returns
 // whether settings changed. Some HALs (FP6 CamX) keep request values that a later request
 // omits, and in FAST/HIGH_QUALITY mode sample their own curve at the input points of the
-// last curve they received: restore with the curves from the HAL's default request
-// (withDefaults), not by removing the keys, or the picture stays darker after unmuting.
+// last curve they received: restore with full curves (withDefaults and
+// CameraMuteTonemapState::restoreCurves), not by removing the keys, or the picture stays
+// darker after unmuting.
 bool overrideTonemapForMute(CameraMetadata* settings, bool mute,
         const CameraMuteTonemap& original);
 
@@ -65,16 +67,37 @@ bool overrideTonemapForMute(CameraMetadata* settings, bool mute,
 // curves present with every output point at 0.
 bool isTonemapBlankedResult(const CameraMetadata& result);
 
-// Whether tonemap blanking still works on this device. Fails closed and stays failed: one muted
-// result without the curve switches the device to the test-pattern mute until it is closed.
+// The curves a HAL reports in a live (unmuted, FAST or HIGH_QUALITY) result: all three present
+// with at least 3 control points each and not the zero curve. Empty if the result has none.
+CameraMuteTonemap liveTonemapCurves(const camera_metadata_t* result);
+
+// Evenly spaced control points (in = out) with the given number of points per curve.
+CameraMuteTonemap gridTonemapCurves(size_t points);
+
+// Per-device camera mute tonemap state, shared by the request thread and in-flight requests.
+// Fails closed and stays failed: one muted result without the curve switches the device to the
+// test-pattern mute until it is closed. Also keeps the first live curves the HAL reports, to
+// restore after unmuting where the app's request and the HAL's template have none.
 class CameraMuteTonemapState {
   public:
+    explicit CameraMuteTonemapState(size_t gridPoints = 32) : mGridPoints(gridPoints) {}
+
     bool failed() const { return mFailed.load(); }
     // Returns true if this report turned the state to failed.
     bool reportResult(bool blanked) { return !blanked && !mFailed.exchange(true); }
 
+    bool hasLiveCurves() const { return mHasLiveCurves.load(); }
+    // Keeps the result's live curves if none are kept yet. Returns true if it kept them.
+    bool reportLiveResult(const camera_metadata_t* result);
+    // Curves to restore: the kept live curves, else an evenly spaced grid.
+    CameraMuteTonemap restoreCurves() const;
+
   private:
     std::atomic<bool> mFailed = false;
+    std::atomic<bool> mHasLiveCurves = false;
+    const size_t mGridPoints;
+    mutable std::mutex mLock;
+    CameraMuteTonemap mLiveCurves;  // guarded by mLock
 };
 
 // App request values to restore in the results of a muted capture.
