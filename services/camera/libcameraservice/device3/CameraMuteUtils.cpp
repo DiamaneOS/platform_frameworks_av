@@ -160,6 +160,58 @@ CameraMuteTonemap CameraMuteTonemap::withDefaults(const CameraMuteTonemap& defau
     return merged;
 }
 
+CameraMuteTonemap liveTonemapCurves(const camera_metadata_t* result) {
+    CameraMuteTonemap live;
+    if (result == nullptr) return live;
+    camera_metadata_ro_entry mode;
+    if (find_camera_metadata_ro_entry(result, ANDROID_TONEMAP_MODE, &mode) != OK ||
+            mode.count != 1 || mode.data.u8[0] == ANDROID_TONEMAP_MODE_CONTRAST_CURVE) {
+        return live;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        camera_metadata_ro_entry curve;
+        if (find_camera_metadata_ro_entry(result, kCurveTags[i], &curve) != OK ||
+                curve.count < 6 || curve.count % 2 != 0 || isBlackCurve(curve)) {
+            return CameraMuteTonemap();
+        }
+        live.hasCurve[i] = true;
+        live.curve[i].assign(curve.data.f, curve.data.f + curve.count);
+    }
+    return live;
+}
+
+CameraMuteTonemap gridTonemapCurves(size_t points) {
+    CameraMuteTonemap grid;
+    if (points < 2) return grid;
+    std::vector<float> curve;
+    for (size_t p = 0; p < points; p++) {
+        float x = static_cast<float>(p) / static_cast<float>(points - 1);
+        curve.push_back(x);
+        curve.push_back(x);
+    }
+    for (size_t i = 0; i < 3; i++) {
+        grid.hasCurve[i] = true;
+        grid.curve[i] = curve;
+    }
+    return grid;
+}
+
+bool CameraMuteTonemapState::reportLiveResult(const camera_metadata_t* result) {
+    if (mHasLiveCurves.load()) return false;
+    CameraMuteTonemap live = liveTonemapCurves(result);
+    if (!live.hasCurve[0]) return false;
+    std::lock_guard<std::mutex> l(mLock);
+    if (mHasLiveCurves.load()) return false;
+    mLiveCurves = std::move(live);
+    mHasLiveCurves = true;
+    return true;
+}
+
+CameraMuteTonemap CameraMuteTonemapState::restoreCurves() const {
+    std::lock_guard<std::mutex> l(mLock);
+    return mHasLiveCurves.load() ? mLiveCurves : gridTonemapCurves(mGridPoints);
+}
+
 bool overrideTonemapForMute(CameraMetadata* settings, bool mute,
         const CameraMuteTonemap& original) {
     bool changed = false;

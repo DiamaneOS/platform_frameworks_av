@@ -3,6 +3,7 @@
 
 #define LOG_TAG "CameraMuteUtilsTest"
 
+#include <cmath>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -176,9 +177,9 @@ TEST(CameraMuteUtilsTest, BlankAndRestoreAppTonemap) {
 }
 
 TEST(CameraMuteUtilsTest, RestoreWritesDefaultCurvesWhereTheAppHasNone) {
-    // The FP6 case: the app's request has a mode but no curves, the HAL keeps the last curves
-    // it got and samples its own curve at their input points, so removing the zero curve's
-    // keys left a linear (darker) picture. Unmuting writes the template's curves instead.
+    // A HAL whose template has curves: the app's request has a mode but no curves, and
+    // unmuting writes the template's curves rather than removing the zero curve's keys (a HAL
+    // that keeps the last curves would otherwise stay on a linear, darker curve).
     CameraMetadata templ;
     uint8_t fast = ANDROID_TONEMAP_MODE_FAST;
     templ.update(ANDROID_TONEMAP_MODE, &fast, 1);
@@ -213,6 +214,84 @@ TEST(CameraMuteUtilsTest, RestoreWritesDefaultCurvesWhereTheAppHasNone) {
     fixupCameraMuteResult(&result, fixup);
     EXPECT_EQ(u8(result, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_HIGH_QUALITY);
     EXPECT_EQ(floats(result, ANDROID_TONEMAP_CURVE_RED), kAppCurve);
+}
+
+namespace {
+
+// A 32-point gamma-like curve as the FP6 reports in FAST mode (inputs i/31).
+std::vector<float> fp6LiveCurve() {
+    std::vector<float> curve;
+    for (int i = 0; i < 32; i++) {
+        float x = i / 31.0f;
+        curve.push_back(x);
+        curve.push_back(std::pow(x, 0.45f));
+    }
+    return curve;
+}
+
+CameraMetadata liveResult(uint8_t mode, const std::vector<float>& curve) {
+    CameraMetadata result;
+    result.update(ANDROID_TONEMAP_MODE, &mode, 1);
+    result.update(ANDROID_TONEMAP_CURVE_RED, curve.data(), curve.size());
+    result.update(ANDROID_TONEMAP_CURVE_GREEN, curve.data(), curve.size());
+    result.update(ANDROID_TONEMAP_CURVE_BLUE, curve.data(), curve.size());
+    return result;
+}
+
+bool report(CameraMuteTonemapState* state, CameraMetadata& result) {
+    const camera_metadata_t* raw = result.getAndLock();
+    bool kept = state->reportLiveResult(raw);
+    result.unlock(raw);
+    return kept;
+}
+
+}  // namespace
+
+TEST(CameraMuteUtilsTest, Fp6RestoreUsesTheLiveCurvesWhenTheTemplateHasNone) {
+    // The FP6's preview template has a tonemap mode but no curves, as has the app's request.
+    CameraMetadata templ;
+    uint8_t fast = ANDROID_TONEMAP_MODE_FAST;
+    templ.update(ANDROID_TONEMAP_MODE, &fast, 1);
+    CameraMuteTonemap templateTonemap = CameraMuteTonemap::fromSettings(templ);
+    EXPECT_FALSE(templateTonemap.hasCurve[0]);
+
+    CameraMuteTonemapState state(32);
+    EXPECT_FALSE(state.hasLiveCurves());
+    // Before any live result: an evenly spaced 32-point grid (the FP6's own input points)
+    CameraMuteTonemap grid = state.restoreCurves();
+    ASSERT_EQ(grid.curve[0].size(), 64u);
+    EXPECT_FLOAT_EQ(grid.curve[0][2], 1 / 31.0f);
+    EXPECT_FLOAT_EQ(grid.curve[0][63], 1.0f);
+
+    // Results that must not be kept: the zero curve, the 2-point curve left by an unmute that
+    // removed the keys, and contrast-curve mode
+    CameraMetadata zero = liveResult(ANDROID_TONEMAP_MODE_FAST, kBlack);
+    EXPECT_FALSE(report(&state, zero));
+    std::vector<float> stale = {0.0f, 0.0f, 1.0f, 0.997f};
+    CameraMetadata twoPoints = liveResult(ANDROID_TONEMAP_MODE_FAST, stale);
+    EXPECT_FALSE(report(&state, twoPoints));
+    CameraMetadata manual = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, fp6LiveCurve());
+    EXPECT_FALSE(report(&state, manual));
+    EXPECT_FALSE(state.hasLiveCurves());
+
+    CameraMetadata live = liveResult(ANDROID_TONEMAP_MODE_FAST, fp6LiveCurve());
+    EXPECT_TRUE(report(&state, live));
+    EXPECT_TRUE(state.hasLiveCurves());
+    // Only the first is kept
+    std::vector<float> other = fp6LiveCurve();
+    other[3] = 0.5f;
+    CameraMetadata later = liveResult(ANDROID_TONEMAP_MODE_FAST, other);
+    EXPECT_FALSE(report(&state, later));
+
+    CameraMetadata settings;
+    settings.update(ANDROID_TONEMAP_MODE, &fast, 1);
+    CameraMuteTonemap restore = CameraMuteTonemap::fromSettings(settings)
+            .withDefaults(templateTonemap).withDefaults(state.restoreCurves());
+    EXPECT_TRUE(overrideTonemapForMute(&settings, true, restore));
+    EXPECT_TRUE(overrideTonemapForMute(&settings, false, restore));
+    EXPECT_EQ(u8(settings, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_FAST);
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_RED), fp6LiveCurve());
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_BLUE), fp6LiveCurve());
 }
 
 TEST(CameraMuteUtilsTest, WithDefaultsKeepsTheAppsOwnValues) {
