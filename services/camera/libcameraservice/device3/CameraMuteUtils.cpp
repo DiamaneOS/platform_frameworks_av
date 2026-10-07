@@ -145,6 +145,21 @@ CameraMuteTonemap CameraMuteTonemap::fromSettings(const CameraMetadata& settings
     return tonemap;
 }
 
+CameraMuteTonemap CameraMuteTonemap::withDefaults(const CameraMuteTonemap& defaults) const {
+    CameraMuteTonemap merged = *this;
+    if (!merged.hasMode && defaults.hasMode) {
+        merged.hasMode = true;
+        merged.mode = defaults.mode;
+    }
+    for (size_t i = 0; i < 3; i++) {
+        if (!merged.hasCurve[i] && defaults.hasCurve[i]) {
+            merged.hasCurve[i] = true;
+            merged.curve[i] = defaults.curve[i];
+        }
+    }
+    return merged;
+}
+
 bool overrideTonemapForMute(CameraMetadata* settings, bool mute,
         const CameraMuteTonemap& original) {
     bool changed = false;

@@ -754,6 +754,8 @@ class Camera3Device :
         bool                                mTestPatternChanged = false;
         // Original tonemap settings, restored when the camera mute tonemap override ends
         camera3::CameraMuteTonemap          mOriginalTonemap;
+        // Whether the settings carry the camera mute tonemap override
+        bool                                mTonemapMuted = false;
         // App values to restore in results while the camera is muted; null when not muted
         std::shared_ptr<const camera3::CameraMuteResultFixup> mCameraMuteResultFixup;
 
@@ -1144,7 +1146,8 @@ class Camera3Device :
         status_t setCameraMute(int32_t muteMode);
 
         // Set when processed-only sessions are muted with the tonemap (see CameraMuteUtils.h)
-        void setCameraMuteTonemapState(std::shared_ptr<camera3::CameraMuteTonemapState> state);
+        void setCameraMuteTonemapState(std::shared_ptr<camera3::CameraMuteTonemapState> state,
+                const camera3::CameraMuteTonemap& defaultTonemap);
 
         // Whether the configured session has outputs the tonemap cannot blank (RAW, depth)
         void setCameraMuteUnprocessedOutput(bool unprocessedOutput);
@@ -1343,6 +1346,10 @@ class Camera3Device :
         bool               mComposerOutput;
         int32_t            mCameraMute; // 0 = no mute, otherwise the TEST_PATTERN_MODE to use
         std::shared_ptr<camera3::CameraMuteTonemapState> mCameraMuteTonemapState;
+        // Tonemap of the HAL's preview template, restored where a request has none
+        camera3::CameraMuteTonemap mCameraMuteDefaultTonemap;
+        // Set once the zero curve was sent, until a request restores the curves
+        bool               mCameraMuteCurveSent = false;
         bool               mCameraMuteUnprocessedOutput = false;
         int32_t            mSettingsOverride; // -1 = use original, otherwise
                                               // the settings override to use.
@@ -1661,6 +1668,8 @@ class Camera3Device :
     int32_t mCameraMuteTestPattern = ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
     // Set when the test pattern is a session key and the tonemap can mute processed outputs
     std::shared_ptr<camera3::CameraMuteTonemapState> mCameraMuteTonemapState;
+    // Tonemap of the HAL's preview template (mode and curves), for restoring after mute
+    camera3::CameraMuteTonemap mCameraMuteDefaultTonemap;
     // Whether the HAL supports zoom settings override
     bool mSupportZoomOverride = false;
 
