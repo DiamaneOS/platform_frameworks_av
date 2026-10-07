@@ -180,6 +180,23 @@ CameraMuteTonemap liveTonemapCurves(const camera_metadata_t* result) {
     return live;
 }
 
+bool isTonemapRestoredResult(const camera_metadata_t* result) {
+    if (result == nullptr) return false;
+    camera_metadata_ro_entry mode;
+    if (find_camera_metadata_ro_entry(result, ANDROID_TONEMAP_MODE, &mode) != OK ||
+            mode.count != 1 || mode.data.u8[0] != ANDROID_TONEMAP_MODE_CONTRAST_CURVE) {
+        return false;
+    }
+    for (uint32_t tag : kCurveTags) {
+        camera_metadata_ro_entry curve;
+        if (find_camera_metadata_ro_entry(result, tag, &curve) != OK || curve.count < 6 ||
+                curve.count % 2 != 0 || isBlackCurve(curve)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 CameraMuteTonemap gridTonemapCurves(size_t points) {
     CameraMuteTonemap grid;
     if (points < 2) return grid;
@@ -257,6 +274,20 @@ void fixupCameraMuteResult(CameraMetadata* result, const CameraMuteResultFixup& 
     camera_metadata_entry data = result->find(ANDROID_SENSOR_TEST_PATTERN_DATA);
     if (data.count >= 4) {
         memcpy(data.data.i32, testPattern->data, sizeof(testPattern->data));
+    }
+
+    if (fixup.tonemapRestoring) {
+        // Restore phase: the HAL reports the CONTRAST_CURVE mode it was sent with the live
+        // curves; the app asked for its own mode.
+        camera_metadata_entry restoreMode = result->find(ANDROID_TONEMAP_MODE);
+        if (restoreMode.count > 0 &&
+                restoreMode.data.u8[0] == ANDROID_TONEMAP_MODE_CONTRAST_CURVE &&
+                !(fixup.tonemap.hasMode &&
+                  fixup.tonemap.mode == ANDROID_TONEMAP_MODE_CONTRAST_CURVE)) {
+            restoreMode.data.u8[0] = fixup.tonemap.hasMode ? fixup.tonemap.mode
+                                                           : ANDROID_TONEMAP_MODE_FAST;
+        }
+        return;
     }
 
     if (!fixup.tonemapBlanked) return;
