@@ -57,6 +57,7 @@
 #include "utils/AttributionAndPermissionUtils.h"
 #include "utils/VirtualDeviceCameraIdMapper.h"
 
+#include <atomic>
 #include <set>
 #include <string>
 #include <list>
@@ -1170,6 +1171,22 @@ private:
     void doUserSwitch(const std::vector<int32_t>& newUserIds);
 
     /**
+     * Runs one step of a client's open or disconnect under a camera service watchdog. Used for
+     * steps taken while holding the connect condition (mServiceLockWrapper): if such a step
+     * never returns, every later open fails and binder-death cleanup waits behind it. Past
+     * maxCycles watchdog cycles, cameraserver and the camera providers abort and restart, as for
+     * a HAL close() hang.
+     */
+    template <typename T>
+    auto runWatchedClientStep(const sp<BasicClient>& client, const char* step, uint32_t maxCycles,
+            T func);
+
+    /**
+     * Disconnects a client under the watchdog, see runWatchedClientStep().
+     */
+    binder::Status disconnectClientWatched(const sp<BasicClient>& client);
+
+    /**
      * Add an event log message.
      */
     void logEvent(const std::string &event);
@@ -1594,8 +1611,9 @@ private:
     // Current camera mute mode
     bool mOverrideCameraMuteMode = false;
 
-    // Camera Service watchdog flag
-    bool mCameraServiceWatchdogEnabled = true;
+    // Camera Service watchdog flag. Atomic: also read without mServiceLock while
+    // disconnecting clients.
+    std::atomic<bool> mCameraServiceWatchdogEnabled = true;
 
     // Current stream use case overrides
     std::vector<int64_t> mStreamUseCaseOverrides;

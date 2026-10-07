@@ -82,6 +82,7 @@
 #include <system/camera.h>
 
 #include "CameraService.h"
+#include "CameraServiceWatchdog.h"
 #include "api1/Camera2Client.h"
 #include "api2/CameraDeviceClient.h"
 #include "utils/CameraServiceProxyWrapper.h"
@@ -2023,6 +2024,35 @@ void CameraService::finishConnectLocked(const sp<BasicClient>& client,
     }
 }
 
+template <typename T>
+auto CameraService::runWatchedClientStep(const sp<BasicClient>& client, const char* step,
+        uint32_t maxCycles, T func) {
+    sp<CameraServiceWatchdog> watchdog;
+    if (mCameraServiceWatchdogEnabled && client != nullptr) {
+        watchdog = sp<CameraServiceWatchdog>::make(mCameraProviderManager->getProviderPids(),
+                client->getClientCallingPid(), client->getClientUid() < AID_APP_START,
+                client->mCameraIdStr, mCameraServiceProxyWrapper, maxCycles);
+        if (watchdog->run("CameraClientWd") != OK) {
+            ALOGW("%s: Camera %s: no watchdog for %s", __FUNCTION__, client->mCameraIdStr.c_str(),
+                    step);
+            watchdog.clear();
+        }
+    }
+    if (watchdog == nullptr) {
+        return func();
+    }
+    auto res = watchdog->watchThread(func, gettid(), step);
+    watchdog->requestExit();
+    return res;
+}
+
+binder::Status CameraService::disconnectClientWatched(const sp<BasicClient>& client) {
+    // Twice the HAL close() limit: the drain before close() may legitimately wait for in-flight
+    // long exposures, and close() has its own watchdog inside.
+    return runWatchedClientStep(client, "disconnect", 2 * kMaxCycles,
+            [&]() { return client->disconnect(); });
+}
+
 status_t CameraService::handleEvictionsLocked(const std::string& cameraId, int clientPid,
         apiLevel effectiveApiLevel, const sp<IBinder>& remoteCallback,
         const std::string& packageName, int oomScoreOffset, bool systemNativeClient,
@@ -2206,7 +2236,8 @@ status_t CameraService::handleEvictionsLocked(const std::string& cameraId, int c
     // Destroy evicted clients
     for (auto& i : evictedClients) {
         // Disconnect is blocking, and should only have returned when HAL has cleaned up
-        i->getValue()->disconnect(); // Clients will remove themselves from the active client list
+        // Clients will remove themselves from the active client list
+        disconnectClientWatched(i->getValue());
     }
 
     restoreCallingIdentity(token);
@@ -2677,12 +2708,13 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const std::str
                 __FUNCTION__);
 
         std::string monitorTags = isClientWatched(client.get()) ? mMonitorTags : std::string();
-        err = client->initialize(mCameraProviderManager, monitorTags);
+        err = runWatchedClientStep(client, "initialize", kMaxCycles,
+                [&]() { return client->initialize(mCameraProviderManager, monitorTags); });
         if (err != OK) {
             ALOGE("%s: Could not initialize client from HAL.", __FUNCTION__);
             // Errors could be from the HAL module open call or from AppOpsManager
             mServiceLock.unlock();
-            client->disconnect();
+            disconnectClientWatched(client);
             mServiceLock.lock();
             switch(err) {
                 case BAD_VALUE:
@@ -2819,7 +2851,7 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const std::str
             int64_t token = clearCallingIdentity();
             // Note AppOp to trigger the "Unblock" dialog
             client->noteAppOp();
-            client->disconnect();
+            disconnectClientWatched(client);
             restoreCallingIdentity(token);
             // Reacquire mServiceLock
             mServiceLock.lock();
@@ -2831,7 +2863,7 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const std::str
         if (shimUpdateOnly) {
             // If only updating legacy shim parameters, immediately disconnect client
             mServiceLock.unlock();
-            client->disconnect();
+            disconnectClientWatched(client);
             mServiceLock.lock();
         } else {
             // Otherwise, add client to active clients list
@@ -3909,7 +3941,7 @@ bool CameraService::evictClientIdByRemote(const wp<IBinder>& remote) {
 
         for (auto& i : evicted) {
             if (i.get() != nullptr) {
-                i->disconnect();
+                disconnectClientWatched(i);
                 ret = true;
             }
         }
@@ -4018,7 +4050,7 @@ void CameraService::doUserSwitch(const std::vector<int32_t>& newUserIds) {
     int64_t token = clearCallingIdentity();
 
     for (auto& i : evicted) {
-        i->disconnect();
+        disconnectClientWatched(i);
     }
 
     restoreCallingIdentity(token);
@@ -6996,7 +7028,7 @@ status_t CameraService::checkIfInjectionCameraIsPresent(const std::string& exter
 
         // Clear caller identity temporarily so client disconnect PID checks work correctly
         int64_t token = clearCallingIdentity();
-        clientSp->disconnect();
+        disconnectClientWatched(clientSp);
         restoreCallingIdentity(token);
 
         // Reacquire mServiceLock
