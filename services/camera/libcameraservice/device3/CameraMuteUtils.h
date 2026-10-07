@@ -48,10 +48,16 @@ struct CameraMuteTonemap {
     std::vector<float> curve[3];
 
     static CameraMuteTonemap fromSettings(const CameraMetadata& settings);
+
+    // This tonemap with the mode and curves it lacks taken from defaults.
+    CameraMuteTonemap withDefaults(const CameraMuteTonemap& defaults) const;
 };
 
 // Sets an all-zero tonemap curve (mute) or restores the original tonemap values. Returns
-// whether settings changed.
+// whether settings changed. Some HALs (FP6 CamX) keep request values that a later request
+// omits, and in FAST/HIGH_QUALITY mode sample their own curve at the input points of the
+// last curve they received: restore with the curves from the HAL's default request
+// (withDefaults), not by removing the keys, or the picture stays darker after unmuting.
 bool overrideTonemapForMute(CameraMetadata* settings, bool mute,
         const CameraMuteTonemap& original);
 

@@ -175,6 +175,69 @@ TEST(CameraMuteUtilsTest, BlankAndRestoreAppTonemap) {
     EXPECT_FALSE(overrideTonemapForMute(&settings, false, original));
 }
 
+TEST(CameraMuteUtilsTest, RestoreWritesDefaultCurvesWhereTheAppHasNone) {
+    // The FP6 case: the app's request has a mode but no curves, the HAL keeps the last curves
+    // it got and samples its own curve at their input points, so removing the zero curve's
+    // keys left a linear (darker) picture. Unmuting writes the template's curves instead.
+    CameraMetadata templ;
+    uint8_t fast = ANDROID_TONEMAP_MODE_FAST;
+    templ.update(ANDROID_TONEMAP_MODE, &fast, 1);
+    templ.update(ANDROID_TONEMAP_CURVE_RED, kAppCurve.data(), kAppCurve.size());
+    templ.update(ANDROID_TONEMAP_CURVE_GREEN, kAppCurve.data(), kAppCurve.size());
+    templ.update(ANDROID_TONEMAP_CURVE_BLUE, kAppCurve.data(), kAppCurve.size());
+    CameraMuteTonemap defaults = CameraMuteTonemap::fromSettings(templ);
+
+    CameraMetadata settings;
+    uint8_t hq = ANDROID_TONEMAP_MODE_HIGH_QUALITY;
+    settings.update(ANDROID_TONEMAP_MODE, &hq, 1);
+    CameraMuteTonemap restore = CameraMuteTonemap::fromSettings(settings).withDefaults(defaults);
+    EXPECT_TRUE(restore.hasMode);
+    EXPECT_EQ(restore.mode, ANDROID_TONEMAP_MODE_HIGH_QUALITY);  // the app's mode wins
+
+    EXPECT_TRUE(overrideTonemapForMute(&settings, true, restore));
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_RED), kBlack);
+    EXPECT_TRUE(overrideTonemapForMute(&settings, false, restore));
+    EXPECT_EQ(u8(settings, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_HIGH_QUALITY);
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_RED), kAppCurve);
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_GREEN), kAppCurve);
+    EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_BLUE), kAppCurve);
+
+    // Muted results show the template's curves, not missing keys
+    CameraMuteResultFixup fixup;
+    fixup.tonemapBlanked = true;
+    fixup.tonemap = restore;
+    CameraMetadata result;
+    uint8_t curveMode = ANDROID_TONEMAP_MODE_CONTRAST_CURVE;
+    result.update(ANDROID_TONEMAP_MODE, &curveMode, 1);
+    result.update(ANDROID_TONEMAP_CURVE_RED, kBlack.data(), kBlack.size());
+    fixupCameraMuteResult(&result, fixup);
+    EXPECT_EQ(u8(result, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_HIGH_QUALITY);
+    EXPECT_EQ(floats(result, ANDROID_TONEMAP_CURVE_RED), kAppCurve);
+}
+
+TEST(CameraMuteUtilsTest, WithDefaultsKeepsTheAppsOwnValues) {
+    CameraMuteTonemap app;
+    app.hasCurve[1] = true;
+    app.curve[1] = kBlack;
+    CameraMuteTonemap defaults;
+    defaults.hasMode = true;
+    defaults.mode = ANDROID_TONEMAP_MODE_FAST;
+    for (size_t i = 0; i < 3; i++) {
+        defaults.hasCurve[i] = true;
+        defaults.curve[i] = kAppCurve;
+    }
+    CameraMuteTonemap merged = app.withDefaults(defaults);
+    EXPECT_TRUE(merged.hasMode);
+    EXPECT_EQ(merged.mode, ANDROID_TONEMAP_MODE_FAST);
+    EXPECT_EQ(merged.curve[0], kAppCurve);
+    EXPECT_EQ(merged.curve[1], kBlack);
+    EXPECT_EQ(merged.curve[2], kAppCurve);
+    // No defaults: unchanged
+    CameraMuteTonemap none = app.withDefaults(CameraMuteTonemap());
+    EXPECT_FALSE(none.hasMode);
+    EXPECT_FALSE(none.hasCurve[0]);
+}
+
 TEST(CameraMuteUtilsTest, RestoreAppContrastCurve) {
     CameraMetadata settings;
     uint8_t curveMode = ANDROID_TONEMAP_MODE_CONTRAST_CURVE;
