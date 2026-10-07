@@ -956,6 +956,14 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                 }
                 releaseCameraMuteHeldBuffers(states, request, isTonemapBlankedResult(applied));
             } else if (request.cameraMuteTonemapState != nullptr &&
+                    request.cameraMuteResultFixup != nullptr &&
+                    request.cameraMuteResultFixup->tonemapRestoring) {
+                if (isTonemapRestoredResult(result->result) &&
+                        request.cameraMuteTonemapState->confirmRestore()) {
+                    ALOGI("%s: Camera %s: the HAL applied the restored tonemap (frame %u)",
+                            __FUNCTION__, states.cameraId.c_str(), frameNumber);
+                }
+            } else if (request.cameraMuteTonemapState != nullptr &&
                     request.cameraMuteResultFixup == nullptr &&
                     !request.cameraMuteTonemapState->hasLiveCurves()) {
                 if (request.cameraMuteTonemapState->reportLiveResult(result->result)) {
