@@ -195,6 +195,14 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
         mCameraMuteTonemapState = std::make_shared<camera3::CameraMuteTonemapState>();
         ALOGI("%s: Camera %s: test pattern is a session key, muting with the tonemap",
                 __FUNCTION__, mId.c_str());
+        // Tonemap values to restore where the app's request has none (see CameraMuteUtils.h)
+        camera_metadata_t* previewTemplate = nullptr;
+        if (mInterface->constructDefaultRequestSettings(CAMERA_TEMPLATE_PREVIEW,
+                &previewTemplate) == OK && previewTemplate != nullptr) {
+            CameraMetadata defaults;
+            defaults.acquire(previewTemplate);
+            mCameraMuteDefaultTonemap = camera3::CameraMuteTonemap::fromSettings(defaults);
+        }
     }
 
     camera_metadata_entry_t availableSettingsOverrides = mDeviceInfo.find(
@@ -212,7 +220,8 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
             this, mStatusTracker, mInterface, sessionParamKeys,
             mUseHalBufManager, mSupportCameraMute, mCompatInfo,
             mSupportZoomOverride);
-    mRequestThread->setCameraMuteTonemapState(mCameraMuteTonemapState);
+    mRequestThread->setCameraMuteTonemapState(mCameraMuteTonemapState,
+            mCameraMuteDefaultTonemap);
     res = mRequestThread->run((std::string("C3Dev-") + mId + "-ReqQueue").c_str());
     if (res != OK) {
         SET_ERR_L(CAMERA_SERVICE_INTERNAL_ERROR,
@@ -4769,9 +4778,11 @@ status_t Camera3Device::RequestThread::setCameraMute(int32_t muteMode) {
 }
 
 void Camera3Device::RequestThread::setCameraMuteTonemapState(
-        std::shared_ptr<camera3::CameraMuteTonemapState> state) {
+        std::shared_ptr<camera3::CameraMuteTonemapState> state,
+        const camera3::CameraMuteTonemap& defaultTonemap) {
     Mutex::Autolock l(mTriggerMutex);
     mCameraMuteTonemapState = std::move(state);
+    mCameraMuteDefaultTonemap = defaultTonemap;
 }
 
 void Camera3Device::RequestThread::setCameraMuteUnprocessedOutput(bool unprocessedOutput) {
@@ -5541,9 +5552,22 @@ bool Camera3Device::RequestThread::overrideTestPattern(
     }
 
     // Only the logical camera's settings drive the processed outputs.
+    auto restoreTonemap = [&]() {
+        return request->mOriginalTonemap.withDefaults(mCameraMuteDefaultTonemap);
+    };
     if (mCameraMuteTonemapState != nullptr && !request->mSettingsList.empty()) {
-        changed |= camera3::overrideTonemapForMute(&request->mSettingsList.begin()->metadata,
-                tonemapMute, request->mOriginalTonemap);
+        if (tonemapMute) {
+            changed |= camera3::overrideTonemapForMute(
+                    &request->mSettingsList.begin()->metadata, true, request->mOriginalTonemap);
+            mCameraMuteCurveSent = true;
+        } else if (mCameraMuteCurveSent || request->mTonemapMuted) {
+            // The HAL keeps the zero curve's control points until a request carries curves
+            // again: restore the app's values, with the default curves where it has none.
+            changed |= camera3::overrideTonemapForMute(
+                    &request->mSettingsList.begin()->metadata, false, restoreTonemap());
+            mCameraMuteCurveSent = false;
+        }
+        request->mTonemapMuted = tonemapMute;
     }
 
     // Keep the app's values for the results, so they don't reveal the mute.
@@ -5563,7 +5587,7 @@ bool Camera3Device::RequestThread::overrideTestPattern(
             }
         }
         fixup->tonemapBlanked = tonemapMute;
-        fixup->tonemap = request->mOriginalTonemap;
+        fixup->tonemap = restoreTonemap();
         request->mCameraMuteResultFixup = std::move(fixup);
     }
 
