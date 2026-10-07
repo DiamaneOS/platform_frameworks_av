@@ -17,6 +17,7 @@
 #ifndef ANDROID_SERVERS_CAMERA3_INFLIGHT_REQUEST_H
 #define ANDROID_SERVERS_CAMERA3_INFLIGHT_REQUEST_H
 
+#include <memory>
 #include <set>
 #include <variant>
 
@@ -27,6 +28,7 @@
 #include <utils/Timers.h>
 
 #include "common/CameraDeviceBase.h"
+#include "device3/CameraMuteUtils.h"
 
 using android::hardware::camera2::impl::MultiResConcurrentReadersStartInfo;
 
@@ -209,6 +211,17 @@ struct InFlightRequest {
 
     // Whether the app explicitly uses ZOOM_RATIO
     bool useZoomRatio;
+
+    // App values to restore in the results of a muted capture; null when not muted
+    std::shared_ptr<const CameraMuteResultFixup> cameraMuteResultFixup;
+    // Frame muted with the tonemap: its output buffers are held (marked as errors and cached)
+    // until its result shows the curve applied, and dropped otherwise.
+    bool cameraMuteHoldBuffers = false;
+    // Set when the result did not show the curve: this frame's buffers are dropped
+    bool cameraMuteDropBuffers = false;
+    std::shared_ptr<CameraMuteTonemapState> cameraMuteTonemapState;
+    // Buffers marked as errors only because they were held
+    std::vector<buffer_handle_t*> cameraMuteHeldBuffers;
 
     static const nsecs_t kDefaultMinExpectedDuration = 33333333; // 33 ms
     static const nsecs_t kDefaultMaxExpectedDuration = 100000000; // 100 ms

@@ -43,6 +43,7 @@
 #include "device3/BufferUtils.h"
 #include "device3/StatusTracker.h"
 #include "device3/Camera3BufferManager.h"
+#include "device3/CameraMuteUtils.h"
 #include "device3/DistortionMapper.h"
 #include "device3/ZoomRatioMapper.h"
 #include "device3/RotateAndCropMapper.h"
@@ -751,6 +752,10 @@ class Camera3Device :
         bool                                mAutoframingChanged = false;
         // Indicates that the camera test pattern setting is modified
         bool                                mTestPatternChanged = false;
+        // Original tonemap settings, restored when the camera mute tonemap override ends
+        camera3::CameraMuteTonemap          mOriginalTonemap;
+        // App values to restore in results while the camera is muted; null when not muted
+        std::shared_ptr<const camera3::CameraMuteResultFixup> mCameraMuteResultFixup;
 
         // Whether this capture request has its zoom ratio set to 1.0x before
         // the framework overrides it for camera HAL consumption.
@@ -1138,6 +1143,12 @@ class Camera3Device :
 
         status_t setCameraMute(int32_t muteMode);
 
+        // Set when processed-only sessions are muted with the tonemap (see CameraMuteUtils.h)
+        void setCameraMuteTonemapState(std::shared_ptr<camera3::CameraMuteTonemapState> state);
+
+        // Whether the configured session has outputs the tonemap cannot blank (RAW, depth)
+        void setCameraMuteUnprocessedOutput(bool unprocessedOutput);
+
         status_t setZoomOverride(int32_t zoomOverride);
 
         status_t setHalInterface(sp<HalInterface> newHalInterface);
@@ -1331,6 +1342,8 @@ class Camera3Device :
         camera_metadata_enum_android_control_autoframing_t mAutoframingOverride;
         bool               mComposerOutput;
         int32_t            mCameraMute; // 0 = no mute, otherwise the TEST_PATTERN_MODE to use
+        std::shared_ptr<camera3::CameraMuteTonemapState> mCameraMuteTonemapState;
+        bool               mCameraMuteUnprocessedOutput = false;
         int32_t            mSettingsOverride; // -1 = use original, otherwise
                                               // the settings override to use.
 
@@ -1391,7 +1404,9 @@ class Camera3Device :
             bool isStillCapture, bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
             const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
             const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs,
-            const TransformationMap& transform);
+            const TransformationMap& transform,
+            std::shared_ptr<const camera3::CameraMuteResultFixup> cameraMuteResultFixup = nullptr,
+            std::shared_ptr<camera3::CameraMuteTonemapState> cameraMuteTonemapState = nullptr);
 
     /**
      * Tracking for idle detection
@@ -1642,8 +1657,10 @@ class Camera3Device :
 
     // Whether the HAL supports camera muting via test pattern
     bool mSupportCameraMute = false;
-    // Whether the HAL supports SOLID_COLOR or BLACK if mSupportCameraMute is true
-    bool mSupportTestPatternSolidColor = false;
+    // Test pattern used to mute the camera: SOLID_COLOR, else BLACK, else OFF
+    int32_t mCameraMuteTestPattern = ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
+    // Set when the test pattern is a session key and the tonemap can mute processed outputs
+    std::shared_ptr<camera3::CameraMuteTonemapState> mCameraMuteTonemapState;
     // Whether the HAL supports zoom settings override
     bool mSupportZoomOverride = false;
 
