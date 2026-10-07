@@ -6522,6 +6522,7 @@ status_t CameraService::handleGetImageDumpMask(int out) {
 }
 
 status_t CameraService::handleSetCameraMute(const Vector<String16>& args) {
+    errno = 0;
     int muteValue = strtol(toStdString(args[1]).c_str(), nullptr, 10);
     if (errno != 0) return BAD_VALUE;
 
@@ -6872,6 +6873,7 @@ status_t CameraService::printWatchedTagsUntilInterrupt(const Vector<String16> &a
 
         size_t intervalValIdx = intervalIdx + 1;
         if (intervalValIdx < args.size()) {
+            errno = 0;
             refreshTimeoutMs = strtol(toStdString(args[intervalValIdx]).c_str(), nullptr, 10);
             if (errno) { return BAD_VALUE; }
         }
