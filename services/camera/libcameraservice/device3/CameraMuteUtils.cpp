@@ -3,9 +3,12 @@
 
 #define LOG_TAG "Camera3-MuteUtils"
 
+#include <log/log.h>
+
 #include "device3/CameraMuteUtils.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <system/graphics.h>
@@ -203,8 +206,10 @@ CameraMuteTonemap gridTonemapCurves(size_t points) {
     std::vector<float> curve;
     for (size_t p = 0; p < points; p++) {
         float x = static_cast<float>(p) / static_cast<float>(points - 1);
+        // Rec. 709 OETF (close to the FP6's own FAST curve; an identity curve looks dark)
+        float y = x < 0.018f ? 4.5f * x : 1.099f * std::pow(x, 0.45f) - 0.099f;
         curve.push_back(x);
-        curve.push_back(x);
+        curve.push_back(std::min(1.0f, std::max(0.0f, y)));
     }
     for (size_t i = 0; i < 3; i++) {
         grid.hasCurve[i] = true;
@@ -213,20 +218,97 @@ CameraMuteTonemap gridTonemapCurves(size_t points) {
     return grid;
 }
 
+bool sameTonemapCurves(const CameraMuteTonemap& a, const CameraMuteTonemap& b) {
+    for (size_t i = 0; i < 3; i++) {
+        if (a.hasCurve[i] != b.hasCurve[i] || a.curve[i].size() != b.curve[i].size()) {
+            return false;
+        }
+        for (size_t j = 0; j < a.curve[i].size(); j++) {
+            if (std::fabs(a.curve[i][j] - b.curve[i][j]) > 1e-3f) return false;
+        }
+    }
+    return true;
+}
+
 bool CameraMuteTonemapState::reportLiveResult(const camera_metadata_t* result) {
-    if (mHasLiveCurves.load()) return false;
+    if (mWantLiveFrames.load() <= 0) return false;
+    mWantLiveFrames--;
     CameraMuteTonemap live = liveTonemapCurves(result);
     if (!live.hasCurve[0]) return false;
     std::lock_guard<std::mutex> l(mLock);
-    if (mHasLiveCurves.load()) return false;
+    if (sameTonemapCurves(live, gridTonemapCurves(mGridPoints)) ||
+            sameTonemapCurves(live, mLastRestore) ||
+            (mHasLiveCurves.load() && sameTonemapCurves(live, mLiveCurves))) {
+        return false;  // an echo of a curve the mute sent
+    }
     mLiveCurves = std::move(live);
     mHasLiveCurves = true;
+    mWantLiveFrames = 0;
     return true;
 }
 
 CameraMuteTonemap CameraMuteTonemapState::restoreCurves() const {
     std::lock_guard<std::mutex> l(mLock);
     return mHasLiveCurves.load() ? mLiveCurves : gridTonemapCurves(mGridPoints);
+}
+
+CameraMuteTonemap CameraMuteTonemapRequests::restoreTonemap(
+        const CameraMuteTonemap& original) const {
+    return original.withDefaults(mTemplate).withDefaults(mState->restoreCurves());
+}
+
+CameraMuteTonemapRequests::Outcome CameraMuteTonemapRequests::apply(CameraMetadata* settings,
+        const CameraMuteTonemap& original, bool mute, bool* overridden) {
+    Outcome outcome;
+    if (mute) {
+        outcome.changed = overrideTonemapForMute(settings, true, original);
+        mCurveSent = true;
+        mRestoring = false;
+        *overridden = true;
+        return outcome;
+    }
+
+    CameraMuteTonemap restore = restoreTonemap(original);
+    bool firstAfterMute = mCurveSent;
+    if (firstAfterMute) {
+        // The HAL keeps the zero curve's control points in FAST/HIGH_QUALITY mode and takes
+        // new ones only in CONTRAST_CURVE mode, so the restore curves go out in that mode until
+        // a result shows them applied.
+        mCurveSent = false;
+        ALOGI("Camera mute: restoring the tonemap with %zu-point curves (%s), in CONTRAST_CURVE "
+                "mode first", restore.curve[0].size() / 2,
+                original.hasCurve[0] ? "app" : mTemplate.hasCurve[0] ? "template" :
+                mState->hasLiveCurves() ? "live result" : "grid");
+        mRestoring = true;
+        mRestoreRequests = 0;
+        mState->beginRestore(restore);
+    }
+    if (mRestoring) {
+        if (mState->restoreConfirmed()) {
+            mRestoring = false;
+            ALOGI("Camera mute: tonemap restored after %d requests", mRestoreRequests);
+        } else if (++mRestoreRequests > kMaxRestoreRequests) {
+            mRestoring = false;
+            ALOGW("Camera mute: no result confirmed the restored tonemap; giving up");
+        }
+        if (!mRestoring) {
+            // Look for the HAL's own curves again in the next live frames.
+            mState->endRestore();
+        }
+    }
+    if (mRestoring) {
+        CameraMuteTonemap curveMode = restore;
+        curveMode.hasMode = true;
+        curveMode.mode = ANDROID_TONEMAP_MODE_CONTRAST_CURVE;
+        outcome.changed = overrideTonemapForMute(settings, false, curveMode);
+        outcome.restoring = true;
+    } else if (*overridden || firstAfterMute) {
+        // The app's values, with full curves where it has none (also for a new request that
+        // comes first after unmuting).
+        outcome.changed = overrideTonemapForMute(settings, false, restore);
+    }
+    *overridden = outcome.restoring;
+    return outcome;
 }
 
 bool overrideTonemapForMute(CameraMetadata* settings, bool mute,

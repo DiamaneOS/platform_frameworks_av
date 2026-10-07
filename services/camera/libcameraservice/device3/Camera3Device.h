@@ -1346,15 +1346,8 @@ class Camera3Device :
         bool               mComposerOutput;
         int32_t            mCameraMute; // 0 = no mute, otherwise the TEST_PATTERN_MODE to use
         std::shared_ptr<camera3::CameraMuteTonemapState> mCameraMuteTonemapState;
-        // Tonemap of the HAL's preview template, restored where a request has none
-        camera3::CameraMuteTonemap mCameraMuteDefaultTonemap;
-        // Set once the zero curve was sent, until the first request after unmuting
-        bool               mCameraMuteCurveSent = false;
-        // Restore phase after unmuting: live curves in CONTRAST_CURVE mode until confirmed
-        bool               mCameraMuteRestoring = false;
-        int                mCameraMuteRestoreRequests = 0;
-        // About 1 s at 30 fps; then FAST with the curves, as before the restore phase
-        static constexpr int kCameraMuteMaxRestoreRequests = 30;
+        // Tonemap mute and restore of the requests; null without tonemap mute
+        std::unique_ptr<camera3::CameraMuteTonemapRequests> mCameraMuteTonemapRequests;
         bool               mCameraMuteUnprocessedOutput = false;
         int32_t            mSettingsOverride; // -1 = use original, otherwise
                                               // the settings override to use.

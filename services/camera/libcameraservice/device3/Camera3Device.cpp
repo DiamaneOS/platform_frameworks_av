@@ -4788,7 +4788,9 @@ void Camera3Device::RequestThread::setCameraMuteTonemapState(
         const camera3::CameraMuteTonemap& defaultTonemap) {
     Mutex::Autolock l(mTriggerMutex);
     mCameraMuteTonemapState = std::move(state);
-    mCameraMuteDefaultTonemap = defaultTonemap;
+    mCameraMuteTonemapRequests = mCameraMuteTonemapState == nullptr ? nullptr :
+            std::make_unique<camera3::CameraMuteTonemapRequests>(mCameraMuteTonemapState,
+                    defaultTonemap);
 }
 
 void Camera3Device::RequestThread::setCameraMuteUnprocessedOutput(bool unprocessedOutput) {
@@ -5558,67 +5560,13 @@ bool Camera3Device::RequestThread::overrideTestPattern(
     }
 
     // Only the logical camera's settings drive the processed outputs.
-    // App values, then the HAL's template, then the first live curves the HAL reported (FP6:
-    // the template has no curves), then an evenly spaced grid.
-    auto restoreTonemap = [&]() {
-        camera3::CameraMuteTonemap tonemap =
-                request->mOriginalTonemap.withDefaults(mCameraMuteDefaultTonemap);
-        return mCameraMuteTonemapState == nullptr ? tonemap :
-                tonemap.withDefaults(mCameraMuteTonemapState->restoreCurves());
-    };
     bool restoring = false;
-    if (mCameraMuteTonemapState != nullptr && !request->mSettingsList.empty()) {
-        CameraMetadata& metadata = request->mSettingsList.begin()->metadata;
-        if (tonemapMute) {
-            changed |= camera3::overrideTonemapForMute(&metadata, true,
-                    request->mOriginalTonemap);
-            mCameraMuteCurveSent = true;
-            mCameraMuteRestoring = false;
-        } else {
-            camera3::CameraMuteTonemap restore = restoreTonemap();
-            bool firstAfterMute = mCameraMuteCurveSent;
-            if (firstAfterMute) {
-                // First request after unmuting. The HAL keeps the zero curve's control points
-                // in FAST/HIGH_QUALITY mode and takes new ones only in CONTRAST_CURVE mode, so
-                // the live curves go out in that mode until a result shows them applied.
-                mCameraMuteCurveSent = false;
-                bool liveCurves = !request->mOriginalTonemap.hasCurve[0] &&
-                        !mCameraMuteDefaultTonemap.hasCurve[0] &&
-                        mCameraMuteTonemapState->hasLiveCurves();
-                ALOGI("Camera mute: restoring the tonemap with %zu-point curves (%s)",
-                        restore.curve[0].size() / 2,
-                        request->mOriginalTonemap.hasCurve[0] ? "app" :
-                        mCameraMuteDefaultTonemap.hasCurve[0] ? "template" :
-                        liveCurves ? "live result, in CONTRAST_CURVE mode first" : "grid");
-                if (liveCurves) {
-                    mCameraMuteRestoring = true;
-                    mCameraMuteRestoreRequests = 0;
-                    mCameraMuteTonemapState->beginRestore();
-                }
-            }
-            if (mCameraMuteRestoring) {
-                if (mCameraMuteTonemapState->restoreConfirmed()) {
-                    mCameraMuteRestoring = false;
-                    ALOGI("Camera mute: tonemap restored after %d requests",
-                            mCameraMuteRestoreRequests);
-                } else if (++mCameraMuteRestoreRequests > kCameraMuteMaxRestoreRequests) {
-                    mCameraMuteRestoring = false;
-                    ALOGW("Camera mute: no result confirmed the restored tonemap; giving up");
-                }
-            }
-            if (mCameraMuteRestoring) {
-                camera3::CameraMuteTonemap curveMode = restore;
-                curveMode.hasMode = true;
-                curveMode.mode = ANDROID_TONEMAP_MODE_CONTRAST_CURVE;
-                changed |= camera3::overrideTonemapForMute(&metadata, false, curveMode);
-                restoring = true;
-            } else if (request->mTonemapOverridden || firstAfterMute) {
-                // The app's values, with full curves where it has none (also for a new request
-                // that comes first after unmuting: the HAL still has the zero curve's points).
-                changed |= camera3::overrideTonemapForMute(&metadata, false, restore);
-            }
-        }
-        request->mTonemapOverridden = tonemapMute || restoring;
+    if (mCameraMuteTonemapRequests != nullptr && !request->mSettingsList.empty()) {
+        auto outcome = mCameraMuteTonemapRequests->apply(
+                &request->mSettingsList.begin()->metadata, request->mOriginalTonemap,
+                tonemapMute, &request->mTonemapOverridden);
+        changed |= outcome.changed;
+        restoring = outcome.restoring;
     }
 
     // Keep the app's values for the results, so they don't reveal the mute or the restore.
@@ -5640,7 +5588,9 @@ bool Camera3Device::RequestThread::overrideTestPattern(
         }
         fixup->tonemapBlanked = tonemapMute;
         fixup->tonemapRestoring = restoring;
-        fixup->tonemap = restoreTonemap();
+        fixup->tonemap = mCameraMuteTonemapRequests != nullptr ?
+                mCameraMuteTonemapRequests->restoreTonemap(request->mOriginalTonemap) :
+                request->mOriginalTonemap;
         request->mCameraMuteResultFixup = std::move(fixup);
     }
 
