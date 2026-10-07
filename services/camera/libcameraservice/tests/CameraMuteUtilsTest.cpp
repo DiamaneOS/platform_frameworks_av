@@ -294,6 +294,66 @@ TEST(CameraMuteUtilsTest, Fp6RestoreUsesTheLiveCurvesWhenTheTemplateHasNone) {
     EXPECT_EQ(floats(settings, ANDROID_TONEMAP_CURVE_BLUE), fp6LiveCurve());
 }
 
+TEST(CameraMuteUtilsTest, Fp6RestorePhaseConfirmation) {
+    // After unmuting, the live curves go out in CONTRAST_CURVE mode until a result shows them
+    // applied; the FP6 HAL takes control points only in that mode.
+    CameraMuteTonemapState state(32);
+    EXPECT_TRUE(state.restoreConfirmed());  // nothing to restore yet
+    state.beginRestore();
+    EXPECT_FALSE(state.restoreConfirmed());
+
+    auto restored = [](CameraMetadata& result) {
+        const camera_metadata_t* raw = result.getAndLock();
+        bool applied = isTonemapRestoredResult(raw);
+        result.unlock(raw);
+        return applied;
+    };
+    // Not yet applied: still the 2-point leftover in FAST, or the zero curve
+    std::vector<float> stale = {0.0f, 0.0f, 1.0f, 0.997f};
+    CameraMetadata leftover = liveResult(ANDROID_TONEMAP_MODE_FAST, stale);
+    EXPECT_FALSE(restored(leftover));
+    CameraMetadata zero = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, kBlack);
+    EXPECT_FALSE(restored(zero));
+    CameraMetadata stillTwoPoints = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, stale);
+    EXPECT_FALSE(restored(stillTwoPoints));
+    CameraMetadata fastLive = liveResult(ANDROID_TONEMAP_MODE_FAST, fp6LiveCurve());
+    EXPECT_FALSE(restored(fastLive));
+    // Applied
+    CameraMetadata applied = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, fp6LiveCurve());
+    EXPECT_TRUE(restored(applied));
+
+    EXPECT_TRUE(state.confirmRestore());
+    EXPECT_TRUE(state.restoreConfirmed());
+    EXPECT_FALSE(state.confirmRestore());  // reported once
+}
+
+TEST(CameraMuteUtilsTest, RestorePhaseResultsShowTheAppsMode) {
+    CameraMuteResultFixup fixup;
+    fixup.tonemapRestoring = true;
+    fixup.tonemap.hasMode = true;
+    fixup.tonemap.mode = ANDROID_TONEMAP_MODE_FAST;
+    for (size_t i = 0; i < 3; i++) {
+        fixup.tonemap.hasCurve[i] = true;
+        fixup.tonemap.curve[i] = fp6LiveCurve();
+    }
+    CameraMetadata result = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, fp6LiveCurve());
+    int32_t off = ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
+    result.update(ANDROID_SENSOR_TEST_PATTERN_MODE, &off, 1);
+
+    fixupCameraMuteResult(&result, fixup);
+
+    EXPECT_EQ(u8(result, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_FAST);
+    EXPECT_EQ(floats(result, ANDROID_TONEMAP_CURVE_RED), fp6LiveCurve());
+    EXPECT_EQ(result.find(ANDROID_SENSOR_TEST_PATTERN_MODE).data.i32[0],
+            ANDROID_SENSOR_TEST_PATTERN_MODE_OFF);
+
+    // An app that asked for CONTRAST_CURVE itself keeps it
+    fixup.tonemap.mode = ANDROID_TONEMAP_MODE_CONTRAST_CURVE;
+    CameraMetadata own = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, fp6LiveCurve());
+    fixupCameraMuteResult(&own, fixup);
+    EXPECT_EQ(u8(own, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_CONTRAST_CURVE);
+}
+
 TEST(CameraMuteUtilsTest, WithDefaultsKeepsTheAppsOwnValues) {
     CameraMuteTonemap app;
     app.hasCurve[1] = true;

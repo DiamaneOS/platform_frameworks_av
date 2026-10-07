@@ -71,6 +71,10 @@ bool isTonemapBlankedResult(const CameraMetadata& result);
 // with at least 3 control points each and not the zero curve. Empty if the result has none.
 CameraMuteTonemap liveTonemapCurves(const camera_metadata_t* result);
 
+// Whether a result shows a restore curve applied: CONTRAST_CURVE mode with all three curves of
+// at least 3 control points, none of them the zero curve.
+bool isTonemapRestoredResult(const camera_metadata_t* result);
+
 // Evenly spaced control points (in = out) with the given number of points per curve.
 CameraMuteTonemap gridTonemapCurves(size_t points);
 
@@ -92,9 +96,18 @@ class CameraMuteTonemapState {
     // Curves to restore: the kept live curves, else an evenly spaced grid.
     CameraMuteTonemap restoreCurves() const;
 
+    // The FP6 HAL takes curve control points only in CONTRAST_CURVE mode and keeps the last
+    // ones it got in FAST/HIGH_QUALITY. After unmuting, the live curves are sent in
+    // CONTRAST_CURVE mode until a result shows them applied (restore phase).
+    void beginRestore() { mRestoreConfirmed = false; }
+    // Returns true if this report confirmed the restore.
+    bool confirmRestore() { return !mRestoreConfirmed.exchange(true); }
+    bool restoreConfirmed() const { return mRestoreConfirmed.load(); }
+
   private:
     std::atomic<bool> mFailed = false;
     std::atomic<bool> mHasLiveCurves = false;
+    std::atomic<bool> mRestoreConfirmed = true;
     const size_t mGridPoints;
     mutable std::mutex mLock;
     CameraMuteTonemap mLiveCurves;  // guarded by mLock
@@ -111,6 +124,8 @@ struct CameraMuteResultFixup {
     std::map<std::string, TestPattern> physicalTestPatterns;
     // Set when the frame is muted with the tonemap instead of the test pattern.
     bool tonemapBlanked = false;
+    // Set for frames of the restore phase after unmuting (CONTRAST_CURVE with live curves).
+    bool tonemapRestoring = false;
     CameraMuteTonemap tonemap;
 };
 
