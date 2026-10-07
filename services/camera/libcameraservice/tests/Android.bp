@@ -24,6 +24,7 @@ cc_defaults {
     // All test sources that can run on both host and device
     // should be listed here
     srcs: [
+        "CameraMuteUtilsTest.cpp",
         "ClientManagerTest.cpp",
         "DepthProcessorTest.cpp",
         "DistortionMapperTest.cpp",

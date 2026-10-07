@@ -254,6 +254,7 @@ cc_library_static {
 
     srcs: [
         "common/DepthPhotoProcessor.cpp",
+        "device3/CameraMuteUtils.cpp",
         "device3/CoordinateMapper.cpp",
         "device3/DistortionMapper.cpp",
         "device3/RotateAndCropMapper.cpp",
