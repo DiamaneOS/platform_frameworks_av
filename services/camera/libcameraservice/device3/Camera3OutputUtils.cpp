@@ -965,7 +965,7 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                 }
             } else if (request.cameraMuteTonemapState != nullptr &&
                     request.cameraMuteResultFixup == nullptr &&
-                    !request.cameraMuteTonemapState->hasLiveCurves()) {
+                    request.cameraMuteTonemapState->wantsLiveCurves()) {
                 if (request.cameraMuteTonemapState->reportLiveResult(result->result)) {
                     ALOGI("%s: Camera %s: keeping the HAL's live tonemap curves (frame %u) to "
                             "restore after mute", __FUNCTION__, states.cameraId.c_str(),
