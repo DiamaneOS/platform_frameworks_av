@@ -186,28 +186,19 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
         sessionParamKeys.insertArrayAt(sessionKeysEntry.data.i32, 0, sessionKeysEntry.count);
     }
 
-    mCameraMuteTestPattern = camera3::getCameraMuteTestPattern(mDeviceInfo);
-    mSupportCameraMute = mCameraMuteTestPattern != ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
-    // Where the test pattern is a session key, every mute and unmute would reconfigure the
-    // streams; mute processed-only sessions with the tonemap instead.
-    if (mSupportCameraMute && camera3::isTestPatternSessionKey(mDeviceInfo) &&
-            camera3::supportsCameraMuteTonemapBlanking(mDeviceInfo)) {
-        camera_metadata_entry_t maxPoints = mDeviceInfo.find(ANDROID_TONEMAP_MAX_CURVE_POINTS);
-        size_t gridPoints = std::min<size_t>(32, maxPoints.count > 0 ? maxPoints.data.i32[0] : 2);
-        mCameraMuteTonemapState = std::make_shared<camera3::CameraMuteTonemapState>(gridPoints);
-        ALOGI("%s: Camera %s: test pattern is a session key, muting with the tonemap",
-                __FUNCTION__, mId.c_str());
-        // Tonemap values to restore where the app's request has none (see CameraMuteUtils.h)
-        camera_metadata_t* previewTemplate = nullptr;
-        if (mInterface->constructDefaultRequestSettings(CAMERA_TEMPLATE_PREVIEW,
-                &previewTemplate) == OK && previewTemplate != nullptr) {
-            CameraMetadata defaults;
-            defaults.acquire(previewTemplate);
-            mCameraMuteDefaultTonemap = camera3::CameraMuteTonemap::fromSettings(defaults);
+    camera_metadata_entry_t availableTestPatternModes = mDeviceInfo.find(
+            ANDROID_SENSOR_AVAILABLE_TEST_PATTERN_MODES);
+    for (size_t i = 0; i < availableTestPatternModes.count; i++) {
+        if (availableTestPatternModes.data.i32[i] ==
+                ANDROID_SENSOR_TEST_PATTERN_MODE_SOLID_COLOR) {
+            mSupportCameraMute = true;
+            mSupportTestPatternSolidColor = true;
+            break;
+        } else if (availableTestPatternModes.data.i32[i] ==
+                ANDROID_SENSOR_TEST_PATTERN_MODE_BLACK) {
+            mSupportCameraMute = true;
+            mSupportTestPatternSolidColor = false;
         }
-        ALOGI("%s: Camera %s: preview template tonemap: mode %s, curves %s", __FUNCTION__,
-                mId.c_str(), mCameraMuteDefaultTonemap.hasMode ? "yes" : "no",
-                mCameraMuteDefaultTonemap.hasCurve[0] ? "yes" : "no");
     }
 
     camera_metadata_entry_t availableSettingsOverrides = mDeviceInfo.find(
@@ -225,8 +216,6 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
             this, mStatusTracker, mInterface, sessionParamKeys,
             mUseHalBufManager, mSupportCameraMute, mCompatInfo,
             mSupportZoomOverride);
-    mRequestThread->setCameraMuteTonemapState(mCameraMuteTonemapState,
-            mCameraMuteDefaultTonemap);
     res = mRequestThread->run((std::string("C3Dev-") + mId + "-ReqQueue").c_str());
     if (res != OK) {
         SET_ERR_L(CAMERA_SERVICE_INTERNAL_ERROR,
@@ -612,9 +601,6 @@ status_t Camera3Device::dump(int fd, [[maybe_unused]] const Vector<String16> &ar
             mOperatingMode == CAMERA_STREAM_CONFIGURATION_CONSTRAINED_HIGH_SPEED_MODE ?
                     "CONSTRAINED_HIGH_SPEED" : "CUSTOM";
     lines += fmt::sprintf("    Operation mode: %s (%d) \n", mode, mOperatingMode);
-    lines += fmt::sprintf("    Camera mute: test pattern %d, tonemap %s\n", mCameraMuteTestPattern,
-            mCameraMuteTonemapState == nullptr ? "no" :
-            mCameraMuteTonemapState->failed() ? "failed" : "yes");
 
     if (mInputStream != NULL) {
         write(fd, lines.c_str(), lines.size());
@@ -2421,10 +2407,6 @@ sp<Camera3Device::CaptureRequest> Camera3Device::createCaptureRequest(
                 settings.mOriginalTestPatternData[3] = 0;
             }
         }
-        if (mCameraMuteTonemapState != nullptr) {
-            newRequest->mOriginalTonemap = camera3::CameraMuteTonemap::fromSettings(
-                    newRequest->mSettingsList.begin()->metadata);
-        }
     }
 
     if (mSupportZoomOverride) {
@@ -2821,19 +2803,6 @@ status_t Camera3Device::configureStreamsLocked(int operatingMode,
 
     mRequestThread->setComposerSurface(mComposerOutput);
 
-    if (mCameraMuteTonemapState != nullptr) {
-        bool unprocessedOutput = false;
-        for (size_t i = 0; i < mOutputStreams.size(); i++) {
-            const sp<Camera3OutputStreamInterface>& stream = mOutputStreams[i];
-            if (stream != nullptr && camera3::isUnprocessedCameraOutput(stream->getFormat(),
-                    static_cast<int32_t>(stream->getDataSpace()))) {
-                unprocessedOutput = true;
-                break;
-            }
-        }
-        mRequestThread->setCameraMuteUnprocessedOutput(unprocessedOutput);
-    }
-
     // Request thread needs to know to avoid using repeat-last-settings protocol
     // across configure_streams() calls
     if (notifyRequestThread) {
@@ -3051,27 +3020,16 @@ status_t Camera3Device::registerInFlight(uint32_t frameNumber,
         bool isStillCapture, bool isZslCapture, bool rotateAndCropAuto, bool autoframingAuto,
         const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
         const SurfaceMap& outputSurfaces, nsecs_t requestTimeNs,
-        const TransformationMap &transform,
-        std::shared_ptr<const camera3::CameraMuteResultFixup> cameraMuteResultFixup,
-        std::shared_ptr<camera3::CameraMuteTonemapState> cameraMuteTonemapState) {
+        const TransformationMap &transform) {
     ATRACE_CALL();
     std::lock_guard<std::mutex> l(mInFlightLock);
 
-    InFlightRequest request(numBuffers, resultExtras, hasInput,
+    ssize_t res;
+    res = mInFlightMap.add(frameNumber, InFlightRequest(numBuffers, resultExtras, hasInput,
             hasAppCallback, minExpectedDuration, maxExpectedDuration, isFixedFps, physicalCameraIds,
             std::move(requestedMultiResPhysicalIds), isStillCapture, isZslCapture,
             rotateAndCropAuto, autoframingAuto, cameraIdsWithZoom, requestTimeNs, useZoomRatio,
-            outputSurfaces, transform);
-    if (cameraMuteResultFixup != nullptr && cameraMuteResultFixup->tonemapBlanked) {
-        // Hold this frame's buffers until its result shows the curve applied.
-        request.cameraMuteHoldBuffers = true;
-    }
-    // Live frames' results also report the HAL's own curves, kept for unmuting.
-    request.cameraMuteTonemapState = std::move(cameraMuteTonemapState);
-    request.cameraMuteResultFixup = std::move(cameraMuteResultFixup);
-
-    ssize_t res;
-    res = mInFlightMap.add(frameNumber, request);
+            outputSurfaces, transform));
     if (res < 0) return res;
 
     if (mInFlightMap.size() == 1) {
@@ -4561,8 +4519,7 @@ status_t Camera3Device::RequestThread::prepareHalRequests() {
                 isStillCapture, isZslCapture,
                 captureRequest->mRotateAndCropAuto, captureRequest->mAutoframingAuto,
                 mPrevCameraIdsWithZoom, useZoomRatio,
-                surfaceMap, captureRequest->mRequestTimeNs, transformMap,
-                captureRequest->mCameraMuteResultFixup, mCameraMuteTonemapState);
+                surfaceMap, captureRequest->mRequestTimeNs, transformMap);
         ALOGVV("%s: registered in flight requestId = %" PRId32 ", frameNumber = %" PRId64
                ", burstId = %" PRId32 ".",
                 __FUNCTION__,
@@ -4781,21 +4738,6 @@ status_t Camera3Device::RequestThread::setCameraMute(int32_t muteMode) {
         mCameraMute = muteMode;
     }
     return OK;
-}
-
-void Camera3Device::RequestThread::setCameraMuteTonemapState(
-        std::shared_ptr<camera3::CameraMuteTonemapState> state,
-        const camera3::CameraMuteTonemap& defaultTonemap) {
-    Mutex::Autolock l(mTriggerMutex);
-    mCameraMuteTonemapState = std::move(state);
-    mCameraMuteTonemapRequests = mCameraMuteTonemapState == nullptr ? nullptr :
-            std::make_unique<camera3::CameraMuteTonemapRequests>(mCameraMuteTonemapState,
-                    defaultTonemap);
-}
-
-void Camera3Device::RequestThread::setCameraMuteUnprocessedOutput(bool unprocessedOutput) {
-    Mutex::Autolock l(mTriggerMutex);
-    mCameraMuteUnprocessedOutput = unprocessedOutput;
 }
 
 status_t Camera3Device::RequestThread::setZoomOverride(int32_t zoomOverride) {
@@ -5503,13 +5445,6 @@ bool Camera3Device::RequestThread::overrideTestPattern(
 
     bool changed = false;
 
-    // Mute processed-only sessions with the tonemap where the test pattern is a session key,
-    // unless the tonemap failed once (fail closed: back to the test pattern).
-    bool muted = mCameraMute != ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
-    bool tonemapMute = muted && mCameraMuteTonemapState != nullptr &&
-            !mCameraMuteUnprocessedOutput && !mCameraMuteTonemapState->failed();
-    int32_t testPatternMute = tonemapMute ? ANDROID_SENSOR_TEST_PATTERN_MODE_OFF : mCameraMute;
-
     // For a multi-camera, the physical cameras support the same set of
     // test pattern modes as the logical camera.
     for (auto& settings : request->mSettingsList) {
@@ -5522,8 +5457,8 @@ bool Camera3Device::RequestThread::overrideTestPattern(
             settings.mOriginalTestPatternData[2],
             settings.mOriginalTestPatternData[3]
         };
-        if (testPatternMute != ANDROID_SENSOR_TEST_PATTERN_MODE_OFF) {
-            testPatternMode = testPatternMute;
+        if (mCameraMute != ANDROID_SENSOR_TEST_PATTERN_MODE_OFF) {
+            testPatternMode = mCameraMute;
             testPatternData[0] = 0;
             testPatternData[1] = 0;
             testPatternData[2] = 0;
@@ -5557,41 +5492,6 @@ bool Camera3Device::RequestThread::overrideTestPattern(
                     testPatternData, 4);
             changed = true;
         }
-    }
-
-    // Only the logical camera's settings drive the processed outputs.
-    bool restoring = false;
-    if (mCameraMuteTonemapRequests != nullptr && !request->mSettingsList.empty()) {
-        auto outcome = mCameraMuteTonemapRequests->apply(
-                &request->mSettingsList.begin()->metadata, request->mOriginalTonemap,
-                tonemapMute, &request->mTonemapOverridden);
-        changed |= outcome.changed;
-        restoring = outcome.restoring;
-    }
-
-    // Keep the app's values for the results, so they don't reveal the mute or the restore.
-    if ((!muted && !restoring) || request->mSettingsList.empty()) {
-        request->mCameraMuteResultFixup.reset();
-    } else if (request->mCameraMuteResultFixup == nullptr ||
-            request->mCameraMuteResultFixup->tonemapBlanked != tonemapMute ||
-            request->mCameraMuteResultFixup->tonemapRestoring != restoring) {
-        auto fixup = std::make_shared<camera3::CameraMuteResultFixup>();
-        for (auto it = request->mSettingsList.begin(); it != request->mSettingsList.end(); it++) {
-            camera3::CameraMuteResultFixup::TestPattern testPattern;
-            testPattern.mode = it->mOriginalTestPatternMode;
-            memcpy(testPattern.data, it->mOriginalTestPatternData, sizeof(testPattern.data));
-            if (it == request->mSettingsList.begin()) {
-                fixup->logicalTestPattern = testPattern;
-            } else {
-                fixup->physicalTestPatterns[it->cameraId] = testPattern;
-            }
-        }
-        fixup->tonemapBlanked = tonemapMute;
-        fixup->tonemapRestoring = restoring;
-        fixup->tonemap = mCameraMuteTonemapRequests != nullptr ?
-                mCameraMuteTonemapRequests->restoreTonemap(request->mOriginalTonemap) :
-                request->mOriginalTonemap;
-        request->mCameraMuteResultFixup = std::move(fixup);
     }
 
     return changed;
@@ -6131,7 +6031,10 @@ status_t Camera3Device::setCameraMuteLocked(bool enabled) {
         return INVALID_OPERATION;
     }
 
-    int32_t muteMode = enabled ? mCameraMuteTestPattern : ANDROID_SENSOR_TEST_PATTERN_MODE_OFF;
+    int32_t muteMode =
+            !enabled                      ? ANDROID_SENSOR_TEST_PATTERN_MODE_OFF :
+            mSupportTestPatternSolidColor ? ANDROID_SENSOR_TEST_PATTERN_MODE_SOLID_COLOR :
+                                            ANDROID_SENSOR_TEST_PATTERN_MODE_BLACK;
     return mRequestThread->setCameraMute(muteMode);
 }
 

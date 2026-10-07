@@ -31,7 +31,6 @@
     "%s: " fmt, __FUNCTION__,                         \
     ##__VA_ARGS__)
 
-#include <algorithm>
 #include <inttypes.h>
 
 #include <utils/Log.h>
@@ -288,18 +287,13 @@ void insertResultLocked(CaptureOutputStates& states, CaptureResult *result, uint
 
 void sendPartialCaptureResult(CaptureOutputStates& states,
         const camera_metadata_t * partialResult,
-        const CaptureResultExtras &resultExtras, uint32_t frameNumber,
-        const CameraMuteResultFixup* cameraMuteResultFixup) {
+        const CaptureResultExtras &resultExtras, uint32_t frameNumber) {
     ATRACE_CALL();
     std::lock_guard<std::mutex> l(states.outputLock);
 
     CaptureResult captureResult;
     captureResult.mResultExtras = resultExtras;
     captureResult.mMetadata = partialResult;
-
-    if (cameraMuteResultFixup != nullptr) {
-        fixupCameraMuteResult(&captureResult.mMetadata, *cameraMuteResultFixup);
-    }
 
     // Fix up result metadata for monochrome camera.
     status_t res = fixupMonochromeTags(states, states.deviceInfo, captureResult.mMetadata);
@@ -346,8 +340,7 @@ void sendCaptureResult(
         uint32_t frameNumber,
         bool reprocess, bool zslStillCapture, bool rotateAndCropAuto,
         const std::set<std::string>& cameraIdsWithZoom, bool useZoomRatio,
-        const std::vector<PhysicalCaptureResultInfo>& physicalMetadatas,
-        const CameraMuteResultFixup* cameraMuteResultFixup) {
+        const std::vector<PhysicalCaptureResultInfo>& physicalMetadatas) {
     ATRACE_CALL();
     if (pendingMetadata.isEmpty())
         return;
@@ -392,16 +385,6 @@ void sendCaptureResult(
     // Append any previous partials to form a complete result
     if (states.usePartialResult && !collectedPartialResult.isEmpty()) {
         captureResult.mMetadata.append(collectedPartialResult);
-    }
-
-    // Show the app's own values instead of the camera mute override
-    if (cameraMuteResultFixup != nullptr) {
-        fixupCameraMuteResult(&captureResult.mMetadata, *cameraMuteResultFixup);
-        for (auto& physicalMetadata : captureResult.mPhysicalMetadatas) {
-            fixupCameraMuteResult(
-                    &physicalMetadata.mCameraMetadataInfo.get<CameraMetadataInfo::metadata>(),
-                    *cameraMuteResultFixup, physicalMetadata.mPhysicalCameraId);
-        }
     }
 
     captureResult.mMetadata.sort();
@@ -735,33 +718,6 @@ void recalculateTransform(const CameraMetadata& staticInfo,
     }
 }
 
-// Releases a tonemap-muted frame's held buffers if its result shows the all-zero curve applied.
-// Otherwise they stay errors and are dropped, and the device mutes with the test pattern from
-// then on (fail closed).
-static void releaseCameraMuteHeldBuffers(CaptureOutputStates& states, InFlightRequest& request,
-        bool blanked) {
-    request.cameraMuteHoldBuffers = false;
-    if (blanked) {
-        for (size_t i = 0; i < request.pendingOutputBuffers.size(); i++) {
-            camera_stream_buffer_t& buffer = request.pendingOutputBuffers.editItemAt(i);
-            if (std::find(request.cameraMuteHeldBuffers.begin(),
-                    request.cameraMuteHeldBuffers.end(), buffer.buffer) !=
-                    request.cameraMuteHeldBuffers.end()) {
-                buffer.status = CAMERA_BUFFER_STATUS_OK;
-            }
-        }
-    } else {
-        request.cameraMuteDropBuffers = true;
-        if (request.cameraMuteTonemapState != nullptr &&
-                request.cameraMuteTonemapState->reportResult(false)) {
-            ALOGE("%s: Camera %s: the HAL did not apply the mute tonemap curve (frame %" PRId64
-                    "); dropping its buffers and muting with the test pattern",
-                    __FUNCTION__, states.cameraId.c_str(), request.resultExtras.frameNumber);
-        }
-    }
-    request.cameraMuteHeldBuffers.clear();
-}
-
 void processCaptureResult(CaptureOutputStates& states, const camera_capture_result *result) {
     ATRACE_CALL();
 
@@ -888,7 +844,7 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
             if (isPartialResult && request.hasCallback) {
                 // Send partial capture result
                 sendPartialCaptureResult(states, result->result, request.resultExtras,
-                        frameNumber, request.cameraMuteResultFixup.get());
+                        frameNumber);
             }
         }
 
@@ -947,31 +903,6 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                 collectedPartialResult.acquire(
                     request.collectedPartialResult);
             }
-            if (request.cameraMuteHoldBuffers) {
-                // Before any fixup: the HAL's own report of what it applied
-                CameraMetadata applied;
-                applied.append(result->result);
-                if (!collectedPartialResult.isEmpty()) {
-                    applied.append(collectedPartialResult);
-                }
-                releaseCameraMuteHeldBuffers(states, request, isTonemapBlankedResult(applied));
-            } else if (request.cameraMuteTonemapState != nullptr &&
-                    request.cameraMuteResultFixup != nullptr &&
-                    request.cameraMuteResultFixup->tonemapRestoring) {
-                if (isTonemapRestoredResult(result->result) &&
-                        request.cameraMuteTonemapState->confirmRestore()) {
-                    ALOGI("%s: Camera %s: the HAL applied the restored tonemap (frame %u)",
-                            __FUNCTION__, states.cameraId.c_str(), frameNumber);
-                }
-            } else if (request.cameraMuteTonemapState != nullptr &&
-                    request.cameraMuteResultFixup == nullptr &&
-                    request.cameraMuteTonemapState->wantsLiveCurves()) {
-                if (request.cameraMuteTonemapState->reportLiveResult(result->result)) {
-                    ALOGI("%s: Camera %s: keeping the HAL's live tonemap curves (frame %u) to "
-                            "restore after mute", __FUNCTION__, states.cameraId.c_str(),
-                            frameNumber);
-                }
-            }
             request.haveResultMetadata = true;
             request.errorBufStrategy = ERROR_BUF_RETURN_NOTIFY;
         }
@@ -1005,19 +936,6 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
         // buffers.
         request.pendingOutputBuffers.appendArray(result->output_buffers,
                 result->num_output_buffers);
-        if (request.cameraMuteHoldBuffers || request.cameraMuteDropBuffers) {
-            // Muted with the tonemap and not yet (or not) confirmed by the result: mark the
-            // buffers as errors, so they are cached until the result, or dropped.
-            for (size_t i = request.pendingOutputBuffers.size() - result->num_output_buffers;
-                    i < request.pendingOutputBuffers.size(); i++) {
-                camera_stream_buffer_t& buffer = request.pendingOutputBuffers.editItemAt(i);
-                if (buffer.status == CAMERA_BUFFER_STATUS_ERROR) continue;
-                buffer.status = CAMERA_BUFFER_STATUS_ERROR;
-                if (request.cameraMuteHoldBuffers) {
-                    request.cameraMuteHeldBuffers.push_back(buffer.buffer);
-                }
-            }
-        }
         if (shutterTimestamp != 0) {
             collectAndRemovePendingOutputBuffers(
                 states.useHalBufManager, states.halBufManagedStreamIds,
@@ -1045,7 +963,7 @@ void processCaptureResult(CaptureOutputStates& states, const camera_capture_resu
                     collectedPartialResult, frameNumber,
                     hasInputBufferInRequest, request.zslCapture && request.stillCapture,
                     request.rotateAndCropAuto, cameraIdsWithZoom, request.useZoomRatio,
-                    request.physicalMetadatas, request.cameraMuteResultFixup.get());
+                    request.physicalMetadatas);
             }
         }
         removeInFlightRequestIfReadyLocked(states, idx, &returnableBuffers);
@@ -1422,7 +1340,7 @@ void notifyShutter(CaptureOutputStates& states, const camera_shutter_msg_t &msg)
                     r.collectedPartialResult, msg.frame_number,
                     r.hasInputBuffer, r.zslCapture && r.stillCapture,
                     r.rotateAndCropAuto, cameraIdsWithZoom, r.useZoomRatio,
-                    r.physicalMetadatas, r.cameraMuteResultFixup.get());
+                    r.physicalMetadatas);
             }
             collectAndRemovePendingOutputBuffers(
                     states.useHalBufManager, states.halBufManagedStreamIds,
