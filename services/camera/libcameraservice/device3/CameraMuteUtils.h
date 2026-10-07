@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -75,15 +76,22 @@ CameraMuteTonemap liveTonemapCurves(const camera_metadata_t* result);
 // at least 3 control points, none of them the zero curve.
 bool isTonemapRestoredResult(const camera_metadata_t* result);
 
-// Evenly spaced control points (in = out) with the given number of points per curve.
+// Evenly spaced inputs with the given number of points per curve, outputs on the Rec. 709
+// transfer curve: a display-like curve for when nothing better is known.
 CameraMuteTonemap gridTonemapCurves(size_t points);
+
+// Whether two tonemaps have the same curves (each output within 1/1000).
+bool sameTonemapCurves(const CameraMuteTonemap& a, const CameraMuteTonemap& b);
 
 // Per-device camera mute tonemap state, shared by the request thread and in-flight requests.
 // Fails closed and stays failed: one muted result without the curve switches the device to the
-// test-pattern mute until it is closed. Also keeps the first live curves the HAL reports, to
-// restore after unmuting where the app's request and the HAL's template have none.
+// test-pattern mute until it is closed. Also keeps the HAL's own live curves, to restore after
+// unmuting where the app's request and the HAL's template have none.
 class CameraMuteTonemapState {
   public:
+    // Live frames checked for the HAL's own curves before giving up until the next restore
+    static constexpr int kMaxLiveCurveFrames = 60;
+
     explicit CameraMuteTonemapState(size_t gridPoints = 32) : mGridPoints(gridPoints) {}
 
     bool failed() const { return mFailed.load(); }
@@ -91,26 +99,74 @@ class CameraMuteTonemapState {
     bool reportResult(bool blanked) { return !blanked && !mFailed.exchange(true); }
 
     bool hasLiveCurves() const { return mHasLiveCurves.load(); }
-    // Keeps the result's live curves if none are kept yet. Returns true if it kept them.
+    // Whether live results should be checked for the HAL's own curves: at open and after each
+    // restore, for up to kMaxLiveCurveFrames frames.
+    bool wantsLiveCurves() const { return mWantLiveFrames.load() > 0; }
+    // Keeps the result's live curves (FAST/HIGH_QUALITY, full curves) unless they repeat a curve
+    // sent by the mute (the last restore curves, the kept curves or the grid): those are echoes,
+    // not the HAL's own.
+    // The caller must only pass results of frames sent without a mute or restore override.
+    // Returns true if it kept them.
     bool reportLiveResult(const camera_metadata_t* result);
-    // Curves to restore: the kept live curves, else an evenly spaced grid.
+    // Curves to restore: the kept live curves, else the grid.
     CameraMuteTonemap restoreCurves() const;
 
     // The FP6 HAL takes curve control points only in CONTRAST_CURVE mode and keeps the last
-    // ones it got in FAST/HIGH_QUALITY. After unmuting, the live curves are sent in
+    // ones it got in FAST/HIGH_QUALITY. After unmuting, the restore curves are sent in
     // CONTRAST_CURVE mode until a result shows them applied (restore phase).
-    void beginRestore() { mRestoreConfirmed = false; }
+    void beginRestore(const CameraMuteTonemap& restoreCurves) {
+        std::lock_guard<std::mutex> l(mLock);
+        mLastRestore = restoreCurves;
+        mRestoreConfirmed = false;
+    }
     // Returns true if this report confirmed the restore.
     bool confirmRestore() { return !mRestoreConfirmed.exchange(true); }
     bool restoreConfirmed() const { return mRestoreConfirmed.load(); }
+    // After a restore: look for the HAL's own live curves again.
+    void endRestore() { mWantLiveFrames = kMaxLiveCurveFrames; }
 
   private:
     std::atomic<bool> mFailed = false;
     std::atomic<bool> mHasLiveCurves = false;
     std::atomic<bool> mRestoreConfirmed = true;
+    std::atomic<int> mWantLiveFrames = kMaxLiveCurveFrames;
     const size_t mGridPoints;
     mutable std::mutex mLock;
     CameraMuteTonemap mLiveCurves;  // guarded by mLock
+    CameraMuteTonemap mLastRestore;  // guarded by mLock
+};
+
+// Request-thread side of the tonemap mute: mutes, then restores after unmuting with a
+// CONTRAST_CURVE restore phase. Owned and called by one thread (the request thread).
+class CameraMuteTonemapRequests {
+  public:
+    // About 1 s at 30 fps; then the app's mode with the restore curves
+    static constexpr int kMaxRestoreRequests = 30;
+
+    CameraMuteTonemapRequests(std::shared_ptr<CameraMuteTonemapState> state,
+            const CameraMuteTonemap& templateTonemap)
+        : mState(std::move(state)), mTemplate(templateTonemap) {}
+
+    struct Outcome {
+        bool changed = false;    // settings changed
+        bool restoring = false;  // the request carries the restore-phase override
+    };
+
+    // Applies the mute (mute true) or the restore to one request's logical settings.
+    // original: the app's tonemap values; overridden: per-request flag, true while the
+    // settings carry an override (in/out).
+    Outcome apply(CameraMetadata* settings, const CameraMuteTonemap& original, bool mute,
+            bool* overridden);
+
+    // The app's values completed with the template's, the live or the grid curves.
+    CameraMuteTonemap restoreTonemap(const CameraMuteTonemap& original) const;
+
+  private:
+    std::shared_ptr<CameraMuteTonemapState> mState;
+    CameraMuteTonemap mTemplate;
+    bool mCurveSent = false;   // zero curve sent; restore on the next unmuted request
+    bool mRestoring = false;   // restore phase
+    int mRestoreRequests = 0;
 };
 
 // App request values to restore in the results of a muted capture.

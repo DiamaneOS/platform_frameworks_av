@@ -257,11 +257,12 @@ TEST(CameraMuteUtilsTest, Fp6RestoreUsesTheLiveCurvesWhenTheTemplateHasNone) {
 
     CameraMuteTonemapState state(32);
     EXPECT_FALSE(state.hasLiveCurves());
-    // Before any live result: an evenly spaced 32-point grid (the FP6's own input points)
+    // Before any live result: a 32-point grid (the FP6's own input points, Rec. 709 outputs)
     CameraMuteTonemap grid = state.restoreCurves();
     ASSERT_EQ(grid.curve[0].size(), 64u);
     EXPECT_FLOAT_EQ(grid.curve[0][2], 1 / 31.0f);
-    EXPECT_FLOAT_EQ(grid.curve[0][63], 1.0f);
+    EXPECT_NEAR(grid.curve[0][3], 0.136f, 0.002f);  // Rec. 709, not identity
+    EXPECT_NEAR(grid.curve[0][63], 1.0f, 1e-5f);
 
     // Results that must not be kept: the zero curve, the 2-point curve left by an unmute that
     // removed the keys, and contrast-curve mode
@@ -299,7 +300,7 @@ TEST(CameraMuteUtilsTest, Fp6RestorePhaseConfirmation) {
     // applied; the FP6 HAL takes control points only in that mode.
     CameraMuteTonemapState state(32);
     EXPECT_TRUE(state.restoreConfirmed());  // nothing to restore yet
-    state.beginRestore();
+    state.beginRestore(CameraMuteTonemap());
     EXPECT_FALSE(state.restoreConfirmed());
 
     auto restored = [](CameraMetadata& result) {
@@ -352,6 +353,148 @@ TEST(CameraMuteUtilsTest, RestorePhaseResultsShowTheAppsMode) {
     CameraMetadata own = liveResult(ANDROID_TONEMAP_MODE_CONTRAST_CURVE, fp6LiveCurve());
     fixupCameraMuteResult(&own, fixup);
     EXPECT_EQ(u8(own, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_CONTRAST_CURVE);
+}
+
+namespace {
+
+std::vector<float> curveOf(const CameraMetadata& metadata) {
+    return floats(metadata, ANDROID_TONEMAP_CURVE_RED);
+}
+
+// The FP6 CamX tonemap as seen on the phone: in CONTRAST_CURVE mode it applies and reports the
+// request's curve; in FAST mode it applies and reports its own adaptive curve, except after a
+// zero curve, when it keeps that curve's two points ([0,0, 1,0.997]: a dark linear picture)
+// until a CONTRAST_CURVE request with a real curve. After a CONTRAST_CURVE request, the first
+// echoFrames FAST results still report that request's curve.
+struct FakeFp6Hal {
+    std::vector<float> own = fp6LiveCurve();
+    std::vector<float> stuck = {0.0f, 0.0f, 1.0f, 0.997f};
+    bool stuckOnZero = false;
+    std::vector<float> lastManual;
+    int echoFrames = 0;
+    int echoLeft = 0;
+    std::vector<float> applied;
+
+    CameraMetadata process(const CameraMetadata& request) {
+        camera_metadata_ro_entry mode = request.find(ANDROID_TONEMAP_MODE);
+        uint8_t m = mode.count > 0 ? mode.data.u8[0] : ANDROID_TONEMAP_MODE_FAST;
+        std::vector<float> reported;
+        if (m == ANDROID_TONEMAP_MODE_CONTRAST_CURVE) {
+            applied = curveOf(request);
+            bool zero = true;
+            for (size_t i = 1; i < applied.size(); i += 2) zero = zero && applied[i] == 0.0f;
+            stuckOnZero = zero;
+            lastManual = applied;
+            reported = applied;
+            echoLeft = echoFrames;
+        } else {
+            applied = stuckOnZero ? stuck : own;
+            reported = echoLeft > 0 ? lastManual : applied;
+            if (echoLeft > 0) echoLeft--;
+        }
+        return liveResult(m, reported);
+    }
+};
+
+// One device: the request thread side, the fake HAL and the result side, as in
+// Camera3Device::RequestThread::overrideTestPattern and Camera3OutputUtils.
+struct MuteSession {
+    std::shared_ptr<CameraMuteTonemapState> state =
+            std::make_shared<CameraMuteTonemapState>(32);
+    CameraMuteTonemapRequests requests;
+    FakeFp6Hal hal;
+    CameraMetadata settings;
+    CameraMuteTonemap original;
+    bool overridden = false;
+
+    explicit MuteSession(int echoFrames)
+        : requests(state, templateWithoutCurves()) {
+        uint8_t fast = ANDROID_TONEMAP_MODE_FAST;
+        settings.update(ANDROID_TONEMAP_MODE, &fast, 1);  // GrapheneOS Camera: no curves
+        original = CameraMuteTonemap::fromSettings(settings);
+        hal.echoFrames = echoFrames;
+    }
+
+    static CameraMuteTonemap templateWithoutCurves() {
+        CameraMuteTonemap t;
+        t.hasMode = true;
+        t.mode = ANDROID_TONEMAP_MODE_FAST;
+        return t;
+    }
+
+    void frames(int count, bool mute) {
+        for (int i = 0; i < count; i++) {
+            auto outcome = requests.apply(&settings, original, mute, &overridden);
+            CameraMetadata result = hal.process(settings);
+            const camera_metadata_t* raw = result.getAndLock();
+            if (mute) {
+                EXPECT_TRUE(isTonemapBlankedResult(result));
+            } else if (outcome.restoring) {
+                if (isTonemapRestoredResult(raw)) state->confirmRestore();
+            } else if (state->wantsLiveCurves()) {
+                state->reportLiveResult(raw);
+            }
+            result.unlock(raw);
+        }
+    }
+
+    bool showsOwnCurve() const { return hal.applied == hal.own; }
+};
+
+}  // namespace
+
+TEST(CameraMuteUtilsTest, Fp6MutedFromOpenThenTwoMutes) {
+    // The owner's case: muted from open, unmute, mute, unmute. The second unmute was dark
+    // when an echo of the grid was kept as the HAL's live curve.
+    for (int echo : {0, 3}) {
+        MuteSession s(echo);
+        s.frames(10, true);
+        s.frames(40, false);
+        EXPECT_TRUE(s.showsOwnCurve()) << "echo " << echo;
+        ASSERT_TRUE(s.state->hasLiveCurves());
+        EXPECT_FALSE(sameTonemapCurves(s.state->restoreCurves(), gridTonemapCurves(32)));
+        s.frames(10, true);
+        s.frames(40, false);
+        EXPECT_TRUE(s.showsOwnCurve()) << "echo " << echo;
+        // The app's request is back to its own values (FAST) with full curves
+        EXPECT_EQ(u8(s.settings, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_FAST);
+        EXPECT_FALSE(s.overridden);
+    }
+}
+
+TEST(CameraMuteUtilsTest, Fp6LiveThenThreeMutes) {
+    for (int echo : {0, 3}) {
+        MuteSession s(echo);
+        s.frames(20, false);
+        EXPECT_TRUE(s.showsOwnCurve());
+        for (int round = 0; round < 3; round++) {
+            s.frames(10, true);
+            EXPECT_EQ(curveOf(s.settings), kBlack);
+            s.frames(40, false);
+            EXPECT_TRUE(s.showsOwnCurve()) << "round " << round << " echo " << echo;
+            EXPECT_EQ(s.state->restoreCurves().curve[0], fp6LiveCurve());
+        }
+    }
+}
+
+TEST(CameraMuteUtilsTest, RestorePhaseGivesUpWithoutConfirmation) {
+    // A HAL that never reports CONTRAST_CURVE: the restore phase ends after
+    // kMaxRestoreRequests and the request goes back to the app's mode.
+    auto state = std::make_shared<CameraMuteTonemapState>(32);
+    CameraMuteTonemapRequests requests(state, CameraMuteTonemap());
+    CameraMetadata settings;
+    uint8_t fast = ANDROID_TONEMAP_MODE_FAST;
+    settings.update(ANDROID_TONEMAP_MODE, &fast, 1);
+    CameraMuteTonemap original = CameraMuteTonemap::fromSettings(settings);
+    bool overridden = false;
+    requests.apply(&settings, original, true, &overridden);
+    int restoring = 0;
+    for (int i = 0; i < 2 * CameraMuteTonemapRequests::kMaxRestoreRequests; i++) {
+        if (requests.apply(&settings, original, false, &overridden).restoring) restoring++;
+    }
+    EXPECT_EQ(restoring, CameraMuteTonemapRequests::kMaxRestoreRequests);
+    EXPECT_EQ(u8(settings, ANDROID_TONEMAP_MODE), ANDROID_TONEMAP_MODE_FAST);
+    EXPECT_FALSE(overridden);
 }
 
 TEST(CameraMuteUtilsTest, WithDefaultsKeepsTheAppsOwnValues) {
