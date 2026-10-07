@@ -201,6 +201,18 @@ status_t Camera3Device::initializeCommonLocked(sp<CameraProviderManager> manager
         }
     }
 
+    // A device whose HAL lists a test pattern but cannot mute with it reliably can turn
+    // camera mute off. Its cameras then count as not supporting mute everywhere (camera
+    // privacy and the set-camera-mute shell override), so camera privacy disconnects
+    // clients and refuses new ones instead of muting them.
+    if (mSupportCameraMute &&
+            android::base::GetBoolProperty("ro.camera.disableCameraMute", false)) {
+        ALOGI("%s: Camera %s: camera mute turned off by ro.camera.disableCameraMute",
+                __FUNCTION__, mId.c_str());
+        mSupportCameraMute = false;
+        mSupportTestPatternSolidColor = false;
+    }
+
     camera_metadata_entry_t availableSettingsOverrides = mDeviceInfo.find(
             ANDROID_CONTROL_AVAILABLE_SETTINGS_OVERRIDES);
     for (size_t i = 0; i < availableSettingsOverrides.count; i++) {
