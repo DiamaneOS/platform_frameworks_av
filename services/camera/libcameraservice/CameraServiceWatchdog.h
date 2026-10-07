@@ -61,9 +61,10 @@ public:
     explicit CameraServiceWatchdog(
             const std::set<pid_t> &pids, pid_t clientPid,
             bool isNativePid, const std::string &cameraId,
-            std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper) :
+            std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper,
+            uint32_t maxCycles = kMaxCycles) :
                     mProviderPids(pids), mClientPid(clientPid), mIsNativePid(isNativePid),
-                    mCameraId(cameraId), mPause(true), mMaxCycles(kMaxCycles),
+                    mCameraId(cameraId), mPause(true), mMaxCycles(maxCycles),
                     mCycleLengthMs(kCycleLengthMs), mEnabled(true),
                     mCameraServiceProxyWrapper(cameraServiceProxyWrapper) {};
 
