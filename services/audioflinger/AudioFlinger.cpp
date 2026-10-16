@@ -1756,7 +1756,7 @@ static bool canControlCallAudio() {
         return true;
     }
     // This package is never shared-UID and starts only in the primary user.
-    // Read live package state; the audio permission provider caches UID packages.
+    // Read live package state. The audio permission provider caches UID packages.
     if (uid >= AID_USER_OFFSET) return false;
     PermissionController permissions;
     static const String16 bridge("de.diamaneos.callaudio");
