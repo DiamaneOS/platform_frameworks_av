@@ -348,6 +348,9 @@ private:
 
     std::vector<int32_t> mSupportedPhysicalRequestKeys;
 
+    // Vendor tags removed from session parameters and requests
+    std::vector<uint32_t> mBlockedVendorTags;
+
     template<typename TProviderPtr>
     status_t      initializeImpl(TProviderPtr providerPtr, const std::string& monitorTags);
 

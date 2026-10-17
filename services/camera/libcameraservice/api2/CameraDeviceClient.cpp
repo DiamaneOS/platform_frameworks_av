@@ -45,6 +45,7 @@
 #include "DepthCompositeStream.h"
 #include "HeicCompositeStream.h"
 #include "JpegRCompositeStream.h"
+#include "utils/BlockedVendorTags.h"
 #include "utils/Utils.h"
 
 // Convenience methods for constructing binder::Status objects for error returns
@@ -154,6 +155,7 @@ status_t CameraDeviceClient::initializeImpl(TProviderPtr providerPtr,
                 physicalKeysEntry.data.i32,
                 physicalKeysEntry.data.i32 + physicalKeysEntry.count);
     }
+    mBlockedVendorTags = getBlockedVendorTags(mDevice->getVendorTagId());
 
     auto entry = deviceInfo.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
     mDynamicProfileMap.emplace(
@@ -669,6 +671,13 @@ binder::Status CameraDeviceClient::submitRequestList(
             }
         }
 
+        for (auto& settings : physicalSettingsList) {
+            if (eraseTags(settings.metadata, mBlockedVendorTags)) {
+                ALOGW("%s: Camera %s: Removed blocked vendor tags from a request", __FUNCTION__,
+                        mCameraIdStr.c_str());
+            }
+        }
+
         if (!enforceRequestPermissions(physicalSettingsList.begin()->metadata)) {
             // Callee logs
             return STATUS_ERROR(CameraService::ERROR_PERMISSION_DENIED,
@@ -883,7 +892,12 @@ binder::Status CameraDeviceClient::endConfigureLocked(int operatingMode,
         return res;
     }
 
-    status_t err = mDevice->configureStreams(sessionParams, operatingMode);
+    CameraMetadata allowedSessionParams(sessionParams);
+    if (eraseTags(allowedSessionParams, mBlockedVendorTags)) {
+        ALOGW("%s: Camera %s: Removed blocked vendor tags from the session parameters",
+                __FUNCTION__, mCameraIdStr.c_str());
+    }
+    status_t err = mDevice->configureStreams(allowedSessionParams, operatingMode);
     if (err == BAD_VALUE) {
         std::string msg = fmt::sprintf("Camera %s: Unsupported set of inputs/outputs provided",
                 mCameraIdStr.c_str());
