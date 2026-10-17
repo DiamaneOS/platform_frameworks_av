@@ -258,6 +258,7 @@ cc_library_static {
         "device3/DistortionMapper.cpp",
         "device3/RotateAndCropMapper.cpp",
         "device3/ZoomRatioMapper.cpp",
+        "utils/BlockedVendorTags.cpp",
         "utils/ExifUtils.cpp",
         "utils/SessionConfigurationUtilsHost.cpp",
         "utils/SessionStatsBuilder.cpp",
