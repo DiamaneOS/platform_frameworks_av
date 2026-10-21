@@ -199,6 +199,7 @@ cc_library {
 
     srcs: [
         "AudioFlinger.cpp",
+        "CallAudioParameters.cpp",
         "Client.cpp",
         "DeviceEffectManager.cpp",
         "Effects.cpp",
