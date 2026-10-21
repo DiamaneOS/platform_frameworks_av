@@ -59,4 +59,7 @@ inline unsigned callAudioParameterGroups(const String8& pairs) {
 inline bool containsCallAudioParameter(const String8& pairs) {
     return callAudioParameterGroups(pairs) != 0;
 }
+
+// Whether the calling uid may set or read every protected key in pairs (CallAudioParameters.cpp).
+bool canUseCallAudioParameters(const String8& keyValuePairs);
 } // namespace android
