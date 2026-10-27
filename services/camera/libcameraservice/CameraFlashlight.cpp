@@ -18,6 +18,11 @@
 #define ATRACE_TAG ATRACE_TAG_CAMERA
 // #define LOG_NDEBUG 0
 
+#include <fcntl.h>
+
+#include <android-base/file.h>
+#include <android-base/properties.h>
+#include <android-base/unique_fd.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
 #include <cutils/properties.h>
@@ -27,6 +32,31 @@
 #include "camera/camera2/CaptureRequest.h"
 
 namespace android {
+
+// A device whose HAL ignores the torch strength level can name a node that takes the
+// level instead: ro.camera.torchStrengthNode.<camera id>. The node may drive LEDs that
+// other cameras share, so the service start, opening a camera with a flash and
+// setTorchMode() set every node to its camera's default level.
+static bool writeTorchStrengthNode(const std::string& cameraId, int32_t level) {
+    const std::string node =
+            base::GetProperty("ro.camera.torchStrengthNode." + cameraId, "");
+    if (node.empty() || level <= 0) {
+        return false;
+    }
+    base::unique_fd fd(TEMP_FAILURE_RETRY(open(node.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW)));
+    if (fd < 0 || !base::WriteStringToFd(std::to_string(level), fd)) {
+        ALOGW("%s: cannot write torch strength %d of camera %s to %s: %s", __FUNCTION__,
+                level, cameraId.c_str(), node.c_str(), strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+static void writeDefaultTorchStrengths(const sp<CameraProviderManager>& providerManager) {
+    for (const auto& id : providerManager->getCameraDeviceIds()) {
+        writeTorchStrengthNode(id, providerManager->getTorchDefaultStrengthLevel(id));
+    }
+}
 
 /////////////////////////////////////////////////////////////////////
 // CameraFlashlight implementation begins
@@ -210,6 +240,9 @@ status_t CameraFlashlight::findFlashUnits() {
         mHasFlashlightMap.add(id, hasFlash);
     }
 
+    if (!mFlashlightMapInitialized) {
+        writeDefaultTorchStrengths(mProviderManager);
+    }
     mFlashlightMapInitialized = true;
     return OK;
 }
@@ -254,6 +287,10 @@ status_t CameraFlashlight::prepareDeviceOpen(const std::string& cameraId) {
         ALOGE("%s: findFlashUnits() must be called before this method.",
                __FUNCTION__);
         return NO_INIT;
+    }
+
+    if (hasFlashUnitLocked(cameraId)) {
+        writeDefaultTorchStrengths(mProviderManager);
     }
 
     if (isBackwardCompatibleMode(cameraId)) {
@@ -349,7 +386,14 @@ status_t ProviderFlashControl::setTorchMode(const std::string& cameraId, bool en
     ALOGV("%s: set camera %s torch mode to %d", __FUNCTION__,
             cameraId.c_str(), enabled);
 
-    return mProviderManager->setTorchMode(cameraId, enabled);
+    if (enabled) {
+        writeDefaultTorchStrengths(mProviderManager);
+    }
+    status_t res = mProviderManager->setTorchMode(cameraId, enabled);
+    if (res == OK && !enabled) {
+        writeDefaultTorchStrengths(mProviderManager);
+    }
+    return res;
 }
 
 status_t ProviderFlashControl::turnOnTorchWithStrengthLevel(const std::string& cameraId,
@@ -357,7 +401,13 @@ status_t ProviderFlashControl::turnOnTorchWithStrengthLevel(const std::string& c
     ALOGV("%s: change torch strength level of camera %s to %d", __FUNCTION__,
             cameraId.c_str(), torchStrength);
 
-    return mProviderManager->turnOnTorchWithStrengthLevel(cameraId, torchStrength);
+    // Before the HAL call, so the torch never lights at another level first.
+    bool written = writeTorchStrengthNode(cameraId, torchStrength);
+    status_t res = mProviderManager->turnOnTorchWithStrengthLevel(cameraId, torchStrength);
+    if (res != OK && written) {
+        writeTorchStrengthNode(cameraId, mProviderManager->getTorchDefaultStrengthLevel(cameraId));
+    }
+    return res;
 }
 
 status_t ProviderFlashControl::getTorchStrengthLevel(const std::string& cameraId,
