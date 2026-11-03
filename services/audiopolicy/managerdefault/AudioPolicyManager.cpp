@@ -197,11 +197,13 @@ void AudioPolicyManager::addRoutableDeviceToProfiles(const sp<DeviceDescriptor> 
             bool isSupported = profile->supportsDevice(device);
 
             // When flag is disabled or there is not dynamic profiles,
-            // routable should be equivalent to supported.
+            // routable should be equivalent to supported. The same holds for a HIDL HAL:
+            // its profiles have no HAL ID, and it refuses a mix port without an I/O handle.
             bool isRoutable =
                 !profile->hasDynamicAudioProfile() ||
                 !com::android::media::audioserver::enable_strict_port_routing_checks() ||
                 !com::android::media::audio::check_route_in_get_audio_mix_port() ||
+                profile->getHalId() == AUDIO_PORT_HANDLE_NONE ||
                 mpClientInterface->getAudioMixPort(&devicePort, &mixPort,
                                                    profile->getHalId()) == OK;
 
