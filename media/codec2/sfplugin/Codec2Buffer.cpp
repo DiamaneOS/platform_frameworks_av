@@ -20,6 +20,9 @@
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
+#include <cstring>
+#include <optional>
+
 #include <android_media_codec.h>
 
 #include <android-base/no_destructor.h>
@@ -218,6 +221,35 @@ void ConstLinearBlockBuffer::clearC2BufferRefs() {
 
 // GraphicBlockBuffer
 
+namespace {
+
+// The 8-bit YUV 4:2:0 color formats that name a fixed plane order. Clients that pick one of
+// these for byte buffer input often fill the buffer packed (chroma right after
+// width x height luma), as CTS EncodeDecodeTest does, and do not read stride and
+// slice-height.
+bool IsExplicitYuv420ClientFormat(const sp<AMessage> &format) {
+    int32_t clientColorFormat = 0;
+    if (!format->findInt32(KEY_COLOR_FORMAT, &clientColorFormat)) {
+        return false;
+    }
+    switch (clientColorFormat) {
+        case COLOR_FormatYUV420Planar:
+        case COLOR_FormatYUV420PackedPlanar:
+        case COLOR_FormatYUV420SemiPlanar:
+        case COLOR_FormatYUV420PackedSemiPlanar:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool SameImageLayout(const sp<ABuffer> &a, const sp<ABuffer> &b) {
+    return a != nullptr && b != nullptr && a->size() == b->size()
+            && memcmp(a->data(), b->data(), a->size()) == 0;
+}
+
+}  // namespace
+
 // static
 sp<GraphicBlockBuffer> GraphicBlockBuffer::Allocate(
         const sp<AMessage> &format,
@@ -236,11 +268,28 @@ sp<GraphicBlockBuffer> GraphicBlockBuffer::Allocate(
         ALOGD("Converter init failed: %d", converter.initCheck());
         return nullptr;
     }
+    GraphicView2MediaImageConverter *active = &converter;
+    std::optional<GraphicView2MediaImageConverter> packed;
     bool wrapped = true;
     sp<ABuffer> buffer = converter.wrap();
+    if (buffer != nullptr && IsExplicitYuv420ClientFormat(format)) {
+        // Wrapping hands the client the block's own layout. For the explicit YUV 4:2:0
+        // formats, use it only when it equals the packed layout of the copy path, so that
+        // padding the allocator adds between the planes (for example a vertical stride
+        // aligned to 32 lines) is never exposed. Otherwise copy, as when wrapping fails.
+        packed.emplace(view, format, true /* copy */);
+        if (packed->initCheck() != OK) {
+            ALOGD("Converter init failed: %d", packed->initCheck());
+            return nullptr;
+        }
+        if (!SameImageLayout(converter.imageData(), packed->imageData())) {
+            active = &*packed;
+            buffer = nullptr;
+        }
+    }
     if (buffer == nullptr) {
-        buffer = alloc(converter.backBufferSize());
-        if (!converter.setBackBuffer(buffer)) {
+        buffer = alloc(active->backBufferSize());
+        if (!active->setBackBuffer(buffer)) {
             ALOGD("Converter failed to set back buffer");
             return nullptr;
         }
@@ -251,7 +300,7 @@ sp<GraphicBlockBuffer> GraphicBlockBuffer::Allocate(
             buffer,
             std::move(view),
             block,
-            converter.imageData(),
+            active->imageData(),
             wrapped);
 }
 
