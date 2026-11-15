@@ -41,6 +41,7 @@ cc_defaults {
     shared_libs: [
         "libactivitymanager_aidl",
         "libbase",
+        "packagemanager_aidl-cpp",
         "libdl",
         "libui",
         "liblog",

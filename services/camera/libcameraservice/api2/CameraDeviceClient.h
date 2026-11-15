@@ -468,6 +468,9 @@ private:
     const std::string mOriginalCameraId;
 
     bool mIsVendorClient = false;
+
+    // DiamaneOS: whether this client is Fairphone's own camera app (isFairphoneCamera in the .cpp).
+    bool mIsFairphoneCamera = false;
 };
 
 }; // namespace android

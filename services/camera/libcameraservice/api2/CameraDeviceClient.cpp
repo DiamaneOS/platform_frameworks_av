@@ -47,6 +47,8 @@
 #include "JpegRCompositeStream.h"
 #include "utils/BlockedVendorTags.h"
 #include "utils/Utils.h"
+#include <android/content/pm/IPackageManagerNative.h>
+#include <binder/IServiceManager.h>
 
 // Convenience methods for constructing binder::Status objects for error returns
 #define STATUS_ERROR(errorCode, errorString) \
@@ -81,6 +83,42 @@ CameraDeviceClientBase::CameraDeviceClientBase(
       mRemoteCallback(remoteCallback) {}
 
 // Interface used by CameraService
+
+namespace {
+
+// DiamaneOS: Fairphone's own camera app (com.fps.camera, signed by TCL) takes 50 MP photos with
+// a stream of the sensor's full size (8192x6144), which the camera provider offers for the maximum
+// resolution sensor pixel mode only, and capture requests in the default mode. Android rejects
+// such requests. Qualcomm's camera service on stock skips that check for this app, and so does
+// this one, for that app only: its package must own the client's uid and carry TCL's certificate,
+// the first one of its key lineage, as the App Store pins it.
+constexpr char kFairphoneCameraPackage[] = "com.fps.camera";
+constexpr uint8_t kFairphoneCameraCertSha256[] = {
+        0x0f, 0x00, 0xb3, 0x38, 0xd2, 0x7a, 0xa1, 0xcd,
+        0x1c, 0x4a, 0x00, 0xe8, 0x58, 0x45, 0x01, 0xff,
+        0xb3, 0x67, 0x75, 0xa0, 0x7a, 0xf4, 0x2e, 0x1c,
+        0xc3, 0x94, 0xca, 0x1e, 0xd0, 0x90, 0x84, 0x70};
+
+bool isFairphoneCamera(uid_t uid) {
+    sp<IBinder> binder = defaultServiceManager()->checkService(String16("package_native"));
+    if (binder == nullptr) {
+        return false;
+    }
+    sp<content::pm::IPackageManagerNative> packageManager =
+            interface_cast<content::pm::IPackageManagerNative>(binder);
+    std::vector<std::string> names;
+    if (!packageManager->getNamesForUids({static_cast<int32_t>(uid)}, &names).isOk() ||
+            names.size() != 1 || names[0] != kFairphoneCameraPackage) {
+        return false;
+    }
+    std::vector<uint8_t> certificate(std::begin(kFairphoneCameraCertSha256),
+            std::end(kFairphoneCameraCertSha256));
+    bool signedByTcl = false;
+    return packageManager->hasSha256SigningCertificate(kFairphoneCameraPackage, certificate,
+            &signedByTcl).isOk() && signedByTcl;
+}
+
+} // namespace
 
 CameraDeviceClient::CameraDeviceClient(
         const sp<CameraService>& cameraService,
@@ -121,6 +159,12 @@ status_t CameraDeviceClient::initializeImpl(TProviderPtr providerPtr,
     res = Camera2ClientBase::initialize(providerPtr, monitorTags);
     if (res != OK) {
         return res;
+    }
+
+    mIsFairphoneCamera = isFairphoneCamera(getClientUid());
+    if (mIsFairphoneCamera) {
+        ALOGI("%s: Camera %s: Fairphone Camera, sensor pixel mode not checked", __FUNCTION__,
+                mCameraIdStr.c_str());
     }
 
     if (mSharedMode) {
@@ -620,7 +664,7 @@ binder::Status CameraDeviceClient::submitRequestList(
             if (streamIdSetIt != mHighResolutionCameraIdToStreamIdSet.end()) {
                 std::list<int> streamIdsUsedInRequest = getIntersection(streamIdSetIt->second,
                         outputStreamIds);
-                if (!request.mIsReprocess &&
+                if (!request.mIsReprocess && !mIsFairphoneCamera &&
                         !isSensorPixelModeConsistent(streamIdsUsedInRequest, it.settings)) {
                      ALOGE("%s: Camera %s: Request settings CONTROL_SENSOR_PIXEL_MODE not "
                             "consistent with configured streams. Rejecting request.",
