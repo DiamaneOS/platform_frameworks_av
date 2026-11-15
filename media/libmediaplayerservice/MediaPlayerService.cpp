@@ -526,7 +526,10 @@ sp<IMediaPlayer> MediaPlayerService::create(const sp<IMediaPlayerClient>& client
 }
 
 sp<IMediaCodecList> MediaPlayerService::getCodecList() const {
-    return MediaCodecList::getLocalInstance();
+    // DiamaneOS: an app lists the hardware decoders only if the device lets it create them.
+    // mediaserver's own players get the list for media (MediaCodecList::getInstance), so they
+    // go to software at once.
+    return MediaCodecList::getLocalInstanceFor(IPCThreadState::self()->getCallingUid());
 }
 
 sp<IRemoteDisplay> MediaPlayerService::listenForRemoteDisplay(

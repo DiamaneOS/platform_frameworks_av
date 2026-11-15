@@ -61,6 +61,10 @@ struct MediaCodecList : public BnMediaCodecList {
     // to be used by MediaPlayerService alone
     static sp<IMediaCodecList> getLocalInstance();
 
+    // DiamaneOS, to be used by MediaPlayerService alone: the local instance for the app with
+    // this UID. Without the vendor hardware decoders unless the device lets the UID create them.
+    static sp<IMediaCodecList> getLocalInstanceFor(uid_t uid);
+
     /**
      * Serialization over Binder
      */
@@ -124,6 +128,9 @@ private:
             const sp<AMessage> &format);
 
     static sp<MediaCodecList> Build();
+
+    // A copy of list without the vendor hardware decoders.
+    static sp<MediaCodecList> WithoutHardwareDecoders(const sp<IMediaCodecList> &list);
 
     friend class MediaCodecListGenerator;
 };

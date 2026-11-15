@@ -18,6 +18,7 @@
 #define LOG_TAG "MediaCodecList"
 #include <utils/Log.h>
 
+#include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 
 #include <android_media_codec.h>
@@ -52,7 +53,9 @@
 #include <android/media/IMediaCodecListGenerator.h>
 
 #include <algorithm>
+#include <mutex>
 #include <regex>
+#include <string>
 
 namespace android {
 
@@ -194,7 +197,12 @@ public:
             sp<IMediaPlayerService> service =
                 interface_cast<IMediaPlayerService>(mMediaPlayer);
             if (service.get() != nullptr) {
+                // DiamaneOS: in mediaserver this is a call into the same process. It asks with
+                // mediaserver's own UID, not that of an app whose binder call this thread serves,
+                // so mediaserver's own players get the list for media.
+                const int64_t token = IPCThreadState::self()->clearCallingIdentity();
                 mRemoteInstance = service->getCodecList();
+                IPCThreadState::self()->restoreCallingIdentity(token);
                 if (mRemoteInstance != nullptr) {
                     mBinderDeathObserver = new BinderDeathObserver();
                     mMediaPlayer->linkToDeath(mBinderDeathObserver.get());
@@ -648,6 +656,91 @@ status_t MediaCodecList::writeToParcel(Parcel *parcel) const {
         info->writeToParcel(parcel);
     }
     return OK;
+}
+
+// DiamaneOS: hardware video decoding for selected apps. The device's codec service creates the
+// vendor hardware decoders only for the apps the user selected (device media/seccomp). Every
+// other app gets a codec list without them, so it picks a software decoder on its own instead of
+// failing at the hardware one (Media3 does not try the next decoder by default). The codec
+// service is the security boundary. This list only keeps apps working.
+namespace {
+
+// Set once per boot by the device: "1" all video, "3" selected apps. Anything else, unset
+// included, offers no hardware decoder.
+constexpr char kHwDecodeModeProperty[] = "ro.vendor.diamaneos.hw_video_decode";
+// "1" for each selected app UID. Only system_server sets it.
+constexpr char kHwDecodeAppPropertyPrefix[] = "diamaneos.hw_video_decode.uid.";
+
+bool mayListHardwareDecoders(uid_t uid) {
+    const std::string mode = base::GetProperty(kHwDecodeModeProperty, "");
+    if (mode == "1") {
+        return true;
+    }
+    if (mode != "3") {
+        return false;
+    }
+    // Apps only, as in the codec service. The user ID is part of the UID.
+    const uid_t appId = uid % AID_USER_OFFSET;
+    if (appId < AID_APP_START || appId > AID_APP_END) {
+        return false;
+    }
+    return base::GetProperty(kHwDecodeAppPropertyPrefix + std::to_string(uid), "") == "1";
+}
+
+bool isHardwareDecoder(const sp<MediaCodecInfo> &info) {
+    const int32_t attrs = info->getAttributes();
+    return (attrs & MediaCodecInfo::kFlagIsEncoder) == 0
+            && (attrs & MediaCodecInfo::kFlagIsVendor) != 0
+            && (attrs & MediaCodecInfo::kFlagIsSoftwareOnly) == 0;
+}
+
+// The copy without the hardware decoders, rebuilt when the local instance changes.
+struct FilteredInstance {
+    std::mutex mutex;
+    sp<IMediaCodecList> source;
+    sp<IMediaCodecList> list;
+};
+
+FilteredInstance &filteredInstance() {
+    static base::NoDestructor<FilteredInstance> sInstance;
+    return *sInstance;
+}
+
+}  // unnamed namespace
+
+// static
+sp<MediaCodecList> MediaCodecList::WithoutHardwareDecoders(const sp<IMediaCodecList> &list) {
+    sp<MediaCodecList> filtered = new MediaCodecList();
+    filtered->mInitCheck = OK;
+    filtered->mGlobalSettings = list->getGlobalSettings();
+    if (filtered->mGlobalSettings == nullptr) {
+        filtered->mGlobalSettings = new AMessage();
+    }
+    for (size_t i = 0; i < list->countCodecs(); ++i) {
+        sp<MediaCodecInfo> info = list->getCodecInfo(i);
+        if (info != nullptr && !isHardwareDecoder(info)) {
+            filtered->mCodecInfos.push_back(info);
+        }
+    }
+    return filtered;
+}
+
+// static
+sp<IMediaCodecList> MediaCodecList::getLocalInstanceFor(uid_t uid) {
+    sp<IMediaCodecList> list = getLocalInstance();
+    if (list == nullptr || mayListHardwareDecoders(uid)) {
+        return list;
+    }
+    FilteredInstance &filtered = filteredInstance();
+    std::lock_guard l(filtered.mutex);
+    if (filtered.list == nullptr || filtered.source != list) {
+        sp<MediaCodecList> copy = WithoutHardwareDecoders(list);
+        ALOGI("codec list without %zu hardware decoders for apps that may not use them",
+                list->countCodecs() - copy->countCodecs());
+        filtered.source = list;
+        filtered.list = copy;
+    }
+    return filtered.list;
 }
 
 }  // namespace android
