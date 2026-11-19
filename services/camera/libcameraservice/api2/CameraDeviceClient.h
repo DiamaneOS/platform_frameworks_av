@@ -469,8 +469,9 @@ private:
 
     bool mIsVendorClient = false;
 
-    // DiamaneOS: whether this client is Fairphone's own camera app (isFairphoneCamera in the .cpp).
-    bool mIsFairphoneCamera = false;
+    // DiamaneOS: whether the device exempts this client from the sensor pixel mode check
+    // (utils/PixelModeExemption.h).
+    bool mPixelModeCheckExempt = false;
 };
 
 }; // namespace android
