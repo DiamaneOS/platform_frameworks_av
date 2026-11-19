@@ -44,6 +44,24 @@ int hexValue(char c) {
 
 } // namespace
 
+std::vector<std::string> parseVendorTagNames(const std::string& value) {
+    std::vector<std::string> names;
+    for (const std::string& entry : base::Split(value, ",")) {
+        std::string name = base::Trim(entry);
+        // A section and a tag name, made of name characters and dots only.
+        bool valid = name.find('.') != std::string::npos && name.front() != '.' && name.back() != '.';
+        for (char c : name) {
+            if (!isNameChar(c) && c != '.') valid = false;
+        }
+        if (valid) {
+            names.push_back(name);
+        } else if (!name.empty()) {
+            ALOGW("%s: skipped a malformed vendor tag name", kBlockedVendorTagsProperty);
+        }
+    }
+    return names;
+}
+
 std::vector<AppIdentity> parseAppIdentities(const std::string& value) {
     std::vector<AppIdentity> apps;
     for (const std::string& entry : base::Split(value, ",")) {
@@ -68,6 +86,10 @@ std::vector<AppIdentity> parseAppIdentities(const std::string& value) {
         }
     }
     return apps;
+}
+
+std::vector<std::string> blockedVendorTagNames() {
+    return parseVendorTagNames(base::GetProperty(kBlockedVendorTagsProperty, ""));
 }
 
 std::vector<AppIdentity> pixelModeExemptApps() {

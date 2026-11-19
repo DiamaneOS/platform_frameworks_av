@@ -18,6 +18,15 @@ const std::string kCertificate(64, 'a');
 
 } // namespace
 
+TEST(DeviceCameraListsTest, VendorTagNames) {
+    std::vector<std::string> expected = {"org.example.camera.First", "org.example.camera.second_one"};
+    EXPECT_EQ(expected, parseVendorTagNames(" org.example.camera.First ,org.example.camera.second_one"));
+    EXPECT_TRUE(parseVendorTagNames("").empty());
+    // No section, a stray dot or a character outside names: skipped, the rest kept.
+    expected = {"org.example.camera.Kept"};
+    EXPECT_EQ(expected, parseVendorTagNames("NoSection,.lead,trail.,org.example camera.x,org.example.camera.Kept"));
+}
+
 TEST(DeviceCameraListsTest, AppIdentities) {
     std::vector<AppIdentity> apps = parseAppIdentities("com.example.app:" + kCertificate);
     ASSERT_EQ(1u, apps.size());

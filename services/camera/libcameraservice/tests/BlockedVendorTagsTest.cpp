@@ -3,6 +3,7 @@
 
 #define LOG_TAG "BlockedVendorTagsTest"
 
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -21,6 +22,11 @@ constexpr uint32_t kSnapshotOnlyInsensorZoom = VENDOR_SECTION_START + 1;
 constexpr uint32_t kMfnr = VENDOR_SECTION_START + 2;
 const char* const kTagNames[] = {"EnableInsensorZoom", "EnableSnapshotOnlyInsensorZoom",
         "enableMFNR"};
+// A device's list, as in ro.camera.blocked_vendor_tags, with a name its provider lacks.
+const std::vector<std::string> kListed = {
+        "org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom",
+        "org.codeaurora.qcamera3.sessionParameters.EnableSnapshotOnlyInsensorZoom",
+        "org.example.camera.missing"};
 
 int getTagCount(const vendor_tag_ops_t*) {
     return 3;
@@ -44,7 +50,7 @@ int getTagType(const vendor_tag_ops_t*, uint32_t) {
     return TYPE_INT32;
 }
 
-// The FP6 HAL's session parameter section, with one tag that stays allowed.
+// A Qualcomm camera provider's session parameter section, with one tag that stays allowed.
 sp<VendorTagDescriptor> qcomSessionParameters() {
     vendor_tag_ops_t ops = {};
     ops.get_tag_count = getTagCount;
@@ -59,15 +65,21 @@ sp<VendorTagDescriptor> qcomSessionParameters() {
 
 } // namespace
 
-TEST(BlockedVendorTagsTest, ResolvesTheInSensorZoomTags) {
+TEST(BlockedVendorTagsTest, ResolvesTheListedTags) {
     sp<VendorTagDescriptor> desc = qcomSessionParameters();
     ASSERT_NE(nullptr, desc.get());
     std::vector<uint32_t> expected = {kInsensorZoom, kSnapshotOnlyInsensorZoom};
-    EXPECT_EQ(expected, getBlockedVendorTags(desc.get()));
+    EXPECT_EQ(expected, getBlockedVendorTags(desc.get(), kListed));
 }
 
 TEST(BlockedVendorTagsTest, NothingWithoutTheVendorTags) {
-    EXPECT_TRUE(getBlockedVendorTags(nullptr).empty());
+    EXPECT_TRUE(getBlockedVendorTags(nullptr, kListed).empty());
+}
+
+TEST(BlockedVendorTagsTest, NothingWithoutAList) {
+    sp<VendorTagDescriptor> desc = qcomSessionParameters();
+    ASSERT_NE(nullptr, desc.get());
+    EXPECT_TRUE(getBlockedVendorTags(desc.get(), {}).empty());
 }
 
 TEST(BlockedVendorTagsTest, ErasesOnlyTheBlockedTags) {
@@ -83,7 +95,7 @@ TEST(BlockedVendorTagsTest, ErasesOnlyTheBlockedTags) {
     ASSERT_EQ(OK, settings.update(kMfnr, &on, 1));
     ASSERT_EQ(OK, settings.update(ANDROID_CONTROL_ZOOM_RATIO, &zoom, 1));
 
-    std::vector<uint32_t> blocked = getBlockedVendorTags(CAMERA_METADATA_INVALID_VENDOR_ID);
+    std::vector<uint32_t> blocked = getBlockedVendorTags(CAMERA_METADATA_INVALID_VENDOR_ID, kListed);
     EXPECT_TRUE(eraseTags(settings, blocked));
     EXPECT_FALSE(settings.exists(kInsensorZoom));
     EXPECT_FALSE(settings.exists(kSnapshotOnlyInsensorZoom));

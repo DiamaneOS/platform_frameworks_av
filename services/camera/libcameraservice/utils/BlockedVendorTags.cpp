@@ -9,27 +9,20 @@ namespace android {
 
 namespace camera3 {
 
-namespace {
-
-constexpr const char* kBlockedTagNames[] = {
-    "org.codeaurora.qcamera3.sessionParameters.EnableInsensorZoom",
-    "org.codeaurora.qcamera3.sessionParameters.EnableSnapshotOnlyInsensorZoom",
-};
-
-} // namespace
-
-std::vector<uint32_t> getBlockedVendorTags(const VendorTagDescriptor* vTags) {
+std::vector<uint32_t> getBlockedVendorTags(const VendorTagDescriptor* vTags,
+        const std::vector<std::string>& names) {
     std::vector<uint32_t> tags;
-    for (const char* name : kBlockedTagNames) {
+    for (const std::string& name : names) {
         uint32_t tag;
-        if (CameraMetadata::getTagFromName(name, vTags, &tag) == OK) {
+        if (CameraMetadata::getTagFromName(name.c_str(), vTags, &tag) == OK) {
             tags.push_back(tag);
         }
     }
     return tags;
 }
 
-std::vector<uint32_t> getBlockedVendorTags(metadata_vendor_id_t vendorTagId) {
+std::vector<uint32_t> getBlockedVendorTags(metadata_vendor_id_t vendorTagId,
+        const std::vector<std::string>& names) {
     sp<VendorTagDescriptor> vTags = VendorTagDescriptor::getGlobalVendorTagDescriptor();
     if (vTags == nullptr || vTags->getTagCount() <= 0) {
         sp<VendorTagDescriptorCache> cache = VendorTagDescriptorCache::getGlobalVendorTagCache();
@@ -37,7 +30,7 @@ std::vector<uint32_t> getBlockedVendorTags(metadata_vendor_id_t vendorTagId) {
             cache->getVendorTagDescriptor(vendorTagId, &vTags);
         }
     }
-    return getBlockedVendorTags(vTags.get());
+    return getBlockedVendorTags(vTags.get(), names);
 }
 
 bool eraseTags(CameraMetadata& metadata, const std::vector<uint32_t>& tags) {

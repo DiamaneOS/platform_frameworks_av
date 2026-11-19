@@ -46,6 +46,7 @@
 #include "HeicCompositeStream.h"
 #include "JpegRCompositeStream.h"
 #include "utils/BlockedVendorTags.h"
+#include "utils/DeviceCameraLists.h"
 #include "utils/PixelModeExemption.h"
 #include "utils/Utils.h"
 
@@ -163,7 +164,7 @@ status_t CameraDeviceClient::initializeImpl(TProviderPtr providerPtr,
                 physicalKeysEntry.data.i32,
                 physicalKeysEntry.data.i32 + physicalKeysEntry.count);
     }
-    mBlockedVendorTags = getBlockedVendorTags(mDevice->getVendorTagId());
+    mBlockedVendorTags = getBlockedVendorTags(mDevice->getVendorTagId(), blockedVendorTagNames());
 
     auto entry = deviceInfo.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
     mDynamicProfileMap.emplace(
